@@ -170,7 +170,10 @@ calls are simulated on the phone and nothing leaves it.
   - `appstore/screenshots/6.5-inch/`: 1284 × 2778, the size App Store
     Connect asked for, from an iPhone 14 Plus simulator;
   - `appstore/screenshots/6.9-inch/`: 1320 × 2868, from the iPhone 17 Pro
-    Max simulator, in case the larger size is wanted too.
+    Max simulator, in case the larger size is wanted too;
+  - `appstore/screenshots/6.3-inch/`: 1206 × 2622, from an iPhone 17 Pro
+    simulator (2026-10-12), for the 6.1"/6.3" slot, which takes 1179 × 2556
+    or 1206 × 2622.
 
   The app's own views on iOS 26 in UK English, release build (no "Debug"),
   status bar 9:41 with full signal and battery, server 10.0.0.10, Wi-Fi
