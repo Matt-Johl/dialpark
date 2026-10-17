@@ -116,3 +116,50 @@ func TestTrunkOfferAcceptsPBXAnswers(t *testing.T) {
 		}
 	}
 }
+
+// A peer that numbers a dynamic codec its own way. CUCM answered an Opus
+// offered at 96 with Opus at 114 (lines bench 2026-10-17 13:24); diago
+// compared whole structs, recorded no common codec, fell back to our own
+// first one and the relay sent the phone Opus marked 96, which it dropped.
+// Negotiation must match by kind and keep the peer's number as the one to
+// send with — on both sides of an offer.
+func TestAnAnswerThatRenumbersADynamicCodecStillNegotiates(t *testing.T) {
+	cucmAnswer := "v=0\r\no=CiscoSystemsCCM-SIP 1 1 IN IP4 10.7.160.11\r\ns=SIP Call\r\nc=IN IP4 10.7.166.63\r\nt=0 0\r\n" +
+		"m=audio 20106 RTP/AVP 114 101\r\na=rtpmap:114 opus/48000/2\r\n" +
+		"a=fmtp:114 maxplaybackrate=16000;sprop-maxcapturerate=16000;maxaveragebitrate=64000;stereo=0;sprop-stereo=0;usedtx=0\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\n"
+	// We offered 96 9 0 101 (opus-first PBX set narrowed by the app).
+	offered := []media.Codec{media.CodecAudioOpus, media.CodecAudioG722, media.CodecAudioUlaw, media.CodecTelephoneEvent8000}
+	us := &media.MediaSession{Codecs: append([]media.Codec(nil), offered...), Laddr: net.UDPAddr{IP: net.IPv4(10, 7, 141, 25), Port: 20000}, Mode: "sendrecv"}
+	_ = us.LocalSDP() // the offer went out
+	if err := us.RemoteSDP([]byte(cucmAnswer)); err != nil {
+		t.Fatalf("apply answer: %v", err)
+	}
+	common := us.CommonCodecs()
+	if len(common) == 0 || common[0].Name != "opus" {
+		t.Fatalf("common codecs = %v, want opus first", common)
+	}
+	if got := media.CodecAudioFromSession(us); got.PayloadType != 114 {
+		t.Fatalf("the codec to send with has payload type %d, want the peer's 114", got.PayloadType)
+	}
+	ev, ok := telephoneEventPT(us)
+	if !ok || ev != 101 {
+		t.Fatalf("telephone-event = %d %v, want 101", ev, ok)
+	}
+
+	// The other side of the same habit: an offer at 114 is answered at 114.
+	cucmOffer := strings.Replace(cucmAnswer, "m=audio 20106 RTP/AVP 114 101", "m=audio 20106 RTP/AVP 114 0 101", 1) +
+		"a=rtpmap:0 PCMU/8000\r\n"
+	them := &media.MediaSession{Codecs: []media.Codec{media.CodecAudioOpus, media.CodecAudioG722, media.CodecAudioUlaw, media.CodecTelephoneEvent8000},
+		Laddr: net.UDPAddr{IP: net.IPv4(10, 7, 141, 25), Port: 20002}, Mode: "sendrecv"}
+	if err := them.RemoteSDP([]byte(cucmOffer)); err != nil {
+		t.Fatalf("apply offer: %v", err)
+	}
+	answer := string(them.LocalSDP())
+	if !strings.Contains(answer, "a=rtpmap:114 opus/48000/2") || strings.Contains(answer, "a=rtpmap:96 ") {
+		t.Fatalf("our answer must echo the offerer's 114, got:\n%s", answer)
+	}
+	if got := media.CodecAudioFromSession(them); got.PayloadType != 114 {
+		t.Fatalf("answerer sends with %d, want 114", got.PayloadType)
+	}
+}

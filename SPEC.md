@@ -944,9 +944,23 @@ on by config — see §7.4.
      delayed-offer entry, done — and it also sends each line an
      unsolicited message-summary NOTIFY on every REGISTER, now answered
      200 instead of 400); whether it ticks *MTP Required* and what that
-     does to DTMF (we offer `telephone-event/8000` at PT 101 on both legs
-     and the relay copies payload verbatim, so a PT mismatch across the
-     bridge is the thing to watch); whether it accepts REFER from a
+     does to DTMF (*corrected 2026-10-17:* until that day the PBX leg was
+     offered **no** telephone-event at all — CUCM read the device as having
+     no DTMF — and the relay rewrote every packet, digits included, to the
+     audio payload type. Since `feature/dtmf` both legs offer
+     `telephone-event/8000`, a caller's own event type is echoed in the
+     answer, and the relay forwards event packets under the far leg's event
+     type, kept out of its clock heuristics; `make harness-dtmf` proves
+     digits both ways on Asterisk, trunk and lines mode; and the codec the
+     exchange then chose was decided by its own switches, not ours: with
+     Opus offered it took Opus at its own payload type 114, with G.722
+     first it took PCMU, with G.722 alone it failed the call with cause
+     47 — because the CallManager *service* parameter "G.722 Codec
+     Enabled" was off while the *enterprise* parameter "Advertise G.722
+     Codec" was on; Opus has its own service parameter, on by default.
+     Both live under Service Parameters › Cisco CallManager › Clusterwide
+     Parameters (System - Location and Region). Found 2026-10-17); whether
+     it accepts REFER from a
      third-party device (if not, the server completes the transfer itself
      — the fallback already exists); and cluster nodes as INVITE sources.
      Two things keep that from being merely a list of unknowns. **Nothing
@@ -1750,6 +1764,21 @@ on by config — see §7.4.
      - `Info.plist`, the Local Network prompt: "on the office network".
      New wording for each, then Matt's Xcode build, then screenshot 05
      retaken at both sizes.
+   14. **In-call keypad (app; noted 2026-10-17).** There is no way to press
+     a digit during a call: the in-call screen has no keypad, so an IVR,
+     a voicemail menu or a conference PIN cannot be answered from the
+     app. The whole path beneath it now exists — both legs negotiate
+     `telephone-event/8000` and the relay forwards digits as RFC 4733
+     events (`feature/dtmf`; on the CUCM bench the 8841's digits reached
+     the app as 30 event packets, 2026-10-17 13:07). baresip sends a
+     digit with `call_send_digit`, as RFC 4733 when negotiated and SIP
+     INFO otherwise, so the app's work is the keypad itself: a button on
+     the in-call screen that opens a 12-key pad, each press sending the
+     key and showing it in a strip above the pad, with the CallKit
+     `playDTMFCallAction` wired to the same send so a digit from the
+     system call screen works too. No server change, no wire change.
+     Verified the same way as the bench: a call to an IVR, and the
+     server's relay line showing `events=N` in the app's direction.
 
 ### Much later (not scheduled)
 
@@ -2326,7 +2355,7 @@ suite once on-device. Switching siblings changes delivery, not behaviour.
     rings through the wake, with the caller's name from CUCM; (c) the app
     calls that phone — it arrives as the DN, not as "dialpark", and CUCM's
     INVITE challenge is answered; (d) **DTMF both ways** (the digits reach
-    an IVR or a phone's display), noting whether CUCM inserted an MTP;
+    an IVR or a phone's display), noting whether CUCM inserted an MTP (the server side is proven on Asterisk, `make harness-dtmf`, since 2026-10-17; the CUCM run is still to do);
     (e) hold and blind transfer to a CUCM extension — if REFER is refused,
     the server must complete it and the call must survive; (f) ~~whether
     CUCM's inbound INVITE carries SDP~~ — *answered 2026-10-17:* it does

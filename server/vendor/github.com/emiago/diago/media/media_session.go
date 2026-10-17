@@ -793,13 +793,25 @@ func (s *MediaSession) updateRemoteCodecs(codecs []Codec, answerer bool) int {
 
 	DefaultLogger().Debug("Remote Codecs Update", "local", s.Codecs, "remote", codecs)
 
+	// Dialler patch: a codec is the same codec when its name, clock rate
+	// and channel count match — not its payload type. Dynamic types are
+	// numbers each side picks for itself, and an answerer is free to use
+	// its own: CUCM answers an Opus offered at 96 with Opus at 114 (lines
+	// bench 2026-10-17 13:24). Upstream compared whole structs, so that
+	// answer matched nothing, the session fell back to its own first codec
+	// and sent the phone Opus marked 96, which it dropped: silence from
+	// the app to the phone while the other direction worked. What goes
+	// into the negotiated list is the REMOTE's codec, carrying the number
+	// the remote put in its SDP — the number we must send with and the one
+	// it will send us.
+	//
 	// Some systems may like to answer with local order of preference
 	if SDPCodecPreferLocalOrder > 0 && answerer {
 		filter := make([]Codec, 0, len(codecs))
-		for _, rc := range s.Codecs {
-			for _, c := range codecs {
-				if c == rc {
-					filter = append(filter, c)
+		for _, lc := range s.Codecs {
+			for _, rc := range codecs {
+				if sameCodecKind(lc, rc) {
+					filter = append(filter, rc)
 					break
 				}
 			}
@@ -810,15 +822,22 @@ func (s *MediaSession) updateRemoteCodecs(codecs []Codec, answerer bool) int {
 
 	filter := codecs[:0] // reuse buffer
 	for _, rc := range codecs {
-		for _, c := range s.Codecs {
-			if c == rc {
-				filter = append(filter, c)
+		for _, lc := range s.Codecs {
+			if sameCodecKind(lc, rc) {
+				filter = append(filter, rc)
 				break
 			}
 		}
 	}
 	s.filterCodecs = filter
 	return len(s.filterCodecs)
+}
+
+// sameCodecKind (Dialler patch) is codec identity for negotiation: name
+// (case-insensitive, as RFC 4566 has it), clock rate and channels. The
+// payload type is deliberately not part of it; see updateRemoteCodecs.
+func sameCodecKind(a, b Codec) bool {
+	return strings.EqualFold(a.Name, b.Name) && a.SampleRate == b.SampleRate && a.NumChannels == b.NumChannels
 }
 
 // CommonCodecs returns common codecs if negotiation is finished, that is Local and Remote SDP are exchanged

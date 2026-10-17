@@ -1,6 +1,7 @@
 package b2bua
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/emiago/diago/media"
@@ -97,19 +98,67 @@ func TestLegNAT(t *testing.T) {
 // without transcoding: G.722 wideband first (RTP clock 8000 like G.711,
 // RFC 3551), then PCMU/PCMA. Never Opus by default — Asterisk here has no
 // Opus and CUCM trunks do not either.
-func TestTrunkCodecsAreWidebandThenG711(t *testing.T) {
+// Audio: G.722 first, then G.711, nothing else — and, after the audio,
+// telephone-event (RFC 4733) whatever -trunk-codecs says: an INVITE
+// without it told CUCM the device had no DTMF (bench 2026-10-17).
+func TestTrunkCodecsAreWidebandThenG711ThenTelephoneEvent(t *testing.T) {
 	codecs := Config{}.trunkCodecs()
 	if len(codecs) == 0 || codecs[0].Name != "G722" {
 		t.Fatalf("default trunk offer = %v; G.722 must come first", codecs)
 	}
-	for _, c := range codecs {
+	for _, c := range codecs[:len(codecs)-1] {
 		if c.SampleRate != 8000 || (c.Name != "G722" && c.Name != "PCMU" && c.Name != "PCMA") {
 			t.Errorf("trunk offered %s/%d; a PBX trunk gets G.722 or G.711 only", c.Name, c.SampleRate)
 		}
 	}
+	if last := codecs[len(codecs)-1]; last.Name != "telephone-event" || last.PayloadType != 101 {
+		t.Errorf("the PBX set must end in telephone-event/8000 at 101, got %v", last)
+	}
 	narrow := Config{TrunkCodecs: []media.Codec{media.CodecAudioUlaw}}.trunkCodecs()
-	if len(narrow) != 1 || narrow[0].Name != "PCMU" {
-		t.Errorf("configured trunk codecs not honoured: %v", narrow)
+	if len(narrow) != 2 || narrow[0].Name != "PCMU" || narrow[1].Name != "telephone-event" {
+		t.Errorf("configured trunk codecs not honoured (plus telephone-event): %v", narrow)
+	}
+	// Already there: not doubled.
+	if again := withTelephoneEvent(narrow); len(again) != 2 {
+		t.Errorf("telephone-event added twice: %v", again)
+	}
+}
+
+// The CUCM 200 OK of 2026-10-17 (PCMU and telephone-event at 101), an offer
+// that moved the event to another dynamic type, and one with none.
+func TestTelephoneEventOffered(t *testing.T) {
+	cucm := "v=0\r\no=CiscoSystemsCCM-SIP 1 1 IN IP4 10.7.160.11\r\ns=SIP Call\r\nc=IN IP4 10.7.166.63\r\nt=0 0\r\n" +
+		"m=audio 30266 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\n"
+	if ev, ok := telephoneEventOffered([]byte(cucm)); !ok || ev.PayloadType != 101 || ev.SampleRate != 8000 {
+		t.Errorf("CUCM offer → %v %v, want telephone-event at 101", ev, ok)
+	}
+	moved := strings.ReplaceAll(cucm, "101", "96")
+	if ev, ok := telephoneEventOffered([]byte(moved)); !ok || ev.PayloadType != 96 {
+		t.Errorf("offer at 96 → %v %v, want telephone-event at 96", ev, ok)
+	}
+	none := "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+	if _, ok := telephoneEventOffered([]byte(none)); ok {
+		t.Error("an offer without telephone-event must not report one")
+	}
+	if _, ok := telephoneEventOffered(nil); ok {
+		t.Error("a delayed offer has no body and no event")
+	}
+}
+
+func TestLateOfferCodecsKeepTelephoneEventLast(t *testing.T) {
+	set := Config{}.trunkCodecs()
+	got := lateOfferCodecs(media.CodecAudioUlaw, set)
+	if got[0].Name != "PCMU" || got[len(got)-1].Name != "telephone-event" {
+		t.Errorf("late offer = %v; want the callee's codec first and telephone-event last", got)
+	}
+	n := 0
+	for _, c := range got {
+		if c.Name == "PCMU" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("PCMU appears %d times in %v", n, got)
 	}
 }
 

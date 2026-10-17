@@ -170,6 +170,11 @@ line an unsolicited message-waiting NOTIFY on every registration, which is
 answered 200 and logged (`pbx: message waiting`; the lines bench asserts
 it). Nothing shows the mailbox state on the phone yet.
 
+DTMF crosses the server as RFC 4733 telephone-event packets: both legs
+offer `telephone-event/8000`, and the relay forwards each event under the
+far leg's event payload type rather than as audio. `make harness-dtmf`
+proves digits both ways against Asterisk (`LINES=1` for lines mode).
+
 ### The licence
 
 The server enforces a product licence (SPEC §4.9): a number of app devices
