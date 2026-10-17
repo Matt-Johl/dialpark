@@ -951,8 +951,16 @@ on by config — see §7.4.
      `telephone-event/8000`, a caller's own event type is echoed in the
      answer, and the relay forwards event packets under the far leg's event
      type, kept out of its clock heuristics; `make harness-dtmf` proves
-     digits both ways on Asterisk, trunk and lines mode); whether it
-     accepts REFER from a
+     digits both ways on Asterisk, trunk and lines mode; and the codec the
+     exchange then chose was decided by its own switches, not ours: with
+     Opus offered it took Opus at its own payload type 114, with G.722
+     first it took PCMU, with G.722 alone it failed the call with cause
+     47 — because the CallManager *service* parameter "G.722 Codec
+     Enabled" was off while the *enterprise* parameter "Advertise G.722
+     Codec" was on; Opus has its own service parameter, on by default.
+     Both live under Service Parameters › Cisco CallManager › Clusterwide
+     Parameters (System - Location and Region). Found 2026-10-17); whether
+     it accepts REFER from a
      third-party device (if not, the server completes the transfer itself
      — the fallback already exists); and cluster nodes as INVITE sources.
      Two things keep that from being merely a list of unknowns. **Nothing
