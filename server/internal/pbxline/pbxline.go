@@ -141,13 +141,13 @@ type Config struct {
 	// Expiry is the registration lifetime we ask for (default 1 hour).
 	Expiry time.Duration
 	// MinRefresh floors the refresh interval, so a PBX granting a very
-	// short expiry cannot turn the fleet into a REGISTER storm.
+	// short expiry cannot turn the lines into a REGISTER storm.
 	MinRefresh time.Duration
 	// BackoffBase and BackoffCap bound the retry interval after a
 	// transient failure (defaults 5 s and 5 min).
 	BackoffBase, BackoffCap time.Duration
 	// StartSpread is the window the first REGISTER of each line is
-	// scattered over, so a fleet coming up does not stampede one PBX node
+	// scattered over, so lines coming up together do not stampede one PBX node
 	// (default 5 s).
 	StartSpread time.Duration
 	// UnregisterTimeout bounds the best-effort Expires:0 at shutdown.
@@ -163,7 +163,7 @@ type Config struct {
 	// clamshell sleep, a three-minute hole, two calls refused). The tick is
 	// what notices the clock has moved on; it costs one comparison per line
 	// and acts only when a deadline has passed, so it is idle on a machine
-	// that never sleeps. It bounds how long after a wake the fleet is
+	// that never sleeps. It bounds how long after a wake the lines are
 	// re-registered.
 	Tick time.Duration
 	Log  *slog.Logger
@@ -207,7 +207,7 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Manager holds the fleet's lines. It is safe for concurrent use, and its
+// Manager holds every device's line. It is safe for concurrent use, and its
 // read-only accessors are safe on a nil receiver so a caller in trunk mode
 // (where no manager exists) needs no special case.
 type Manager struct {
@@ -305,7 +305,7 @@ func (m *Manager) Stop() {
 
 // Set replaces the configured lines wholesale — the device store's view at
 // start-up. Lines that are unchanged are left running untouched: re-setting
-// an identical fleet must not drop a single registration.
+// an identical set of lines must not drop a single registration.
 func (m *Manager) Set(lines []Line) {
 	keep := make(map[string]bool, len(lines))
 	for _, l := range lines {
@@ -459,7 +459,7 @@ func (m *Manager) run(ctx context.Context, l *line) {
 	defer m.wg.Done()
 
 	log := m.cfg.Log.With("line", l.snapshot().User)
-	// Scatter the fleet's first REGISTER: fifty lines coming up together
+	// Scatter the first REGISTERs: fifty lines coming up together
 	// would otherwise arrive at one PBX node in the same millisecond.
 	if d := time.Duration(m.cfg.Rand() * float64(m.cfg.StartSpread)); d > 0 {
 		if ok, _ := m.wait(ctx, l, d); !ok {
@@ -483,7 +483,7 @@ func (m *Manager) run(ctx context.Context, l *line) {
 						"dn", cur.DN, "lapsed", now.Sub(st.ExpiresAt).Round(time.Second))
 				}
 			}
-			// A fleet waking from one sleep is due all at once; spread the
+			// Lines waking from one sleep are due all at once; spread the
 			// catch-up as a start is spread. Zero by default: a lapsed line
 			// has already waited long enough.
 			if d := time.Duration(m.cfg.Rand() * float64(m.cfg.StartSpread)); d > 0 {
@@ -591,7 +591,7 @@ func (m *Manager) waitUntil(ctx context.Context, l *line, until time.Time) (ok, 
 
 // sweep is the manager's one clock watcher: every Tick it compares the time
 // of day with each waiting line's deadline and wakes the lines whose moment
-// has passed (see Config.Tick). One ticker for the fleet, one comparison per
+// has passed (see Config.Tick). One ticker for all lines, one comparison per
 // line per tick, and nothing to do unless the clock has jumped.
 func (m *Manager) sweep(ctx context.Context) {
 	defer m.wg.Done()

@@ -668,6 +668,13 @@ func (s *Server) authorized(req *sip.Request, tx sip.ServerTransaction, enrolled
 // address (SPEC §4.4 rule 7), so neither is challenged.
 func (s *Server) authMiddleware(next sipgo.RequestHandler) sipgo.RequestHandler {
 	return func(req *sip.Request, tx sip.ServerTransaction) {
+		// The PBX's unsolicited NOTIFYs never belong to a dialog, and diago
+		// would answer them 400 for exactly that reason (pbxNotify).
+		if req.Method == sip.NOTIFY && !inDialog(req) &&
+			isTrunkSource(req.Transport(), req.Source(), s.cfg.Trunk, s.cfg.TrunkPeers) {
+			s.pbxNotify(req, tx)
+			return
+		}
 		if s.cfg.Auth != nil && req.Method == sip.INVITE && !inDialog(req) &&
 			!isTrunkSource(req.Transport(), req.Source(), s.cfg.Trunk, s.cfg.TrunkPeers) {
 			sipUser := ""
@@ -688,6 +695,71 @@ func (s *Server) authMiddleware(next sipgo.RequestHandler) sipgo.RequestHandler 
 func inDialog(req *sip.Request) bool {
 	to := req.To()
 	return to != nil && to.Params.Has("tag")
+}
+
+// delayedOffer: an INVITE with no body is a delayed offer (RFC 3261
+// §13.2.1) — the caller wants our 200 OK to carry the SDP offer and will
+// answer it in the ACK. CUCM sends these to every third-party SIP line, so
+// lines mode cannot take an inbound call without this. An INVITE with an
+// SDP offer is answered exactly as it always was; the test is the same one
+// diago uses to pick its answer path, so the two cannot disagree.
+func delayedOffer(req *sip.Request) bool {
+	return len(req.Body()) == 0
+}
+
+// pbxNotify answers an out-of-dialog NOTIFY from the PBX. An exchange sends
+// every registered line an unsolicited message-summary NOTIFY (RFC 3842):
+// CUCM on each registration and whenever the mailbox changes, Asterisk the
+// same, and both expect 200 OK. diago matches NOTIFY against its dialogs —
+// REFER progress is the only NOTIFY it knows — and answered these with 400
+// Bad Request, which an exchange logs against the line (CUCM lines bench,
+// 2026-10-17). The mailbox state is logged and otherwise dropped: nothing
+// shows it yet, since a message-waiting light needs a wire field and an
+// app release (SPEC §6 "Much later"). Any other out-of-dialog NOTIFY has no
+// subscription behind it and is answered 481 as RFC 6665 requires.
+func (s *Server) pbxNotify(req *sip.Request, tx sip.ServerTransaction) {
+	event := ""
+	if h := req.GetHeader("Event"); h != nil {
+		event = strings.TrimSpace(h.Value())
+	}
+	name := event
+	if i := strings.IndexByte(name, ';'); i >= 0 {
+		name = strings.TrimSpace(name[:i])
+	}
+	line := ""
+	if to := req.To(); to != nil {
+		line = to.Address.User
+	}
+	log := s.log.With("line", line, "event", event, "source", req.Source())
+	if !strings.EqualFold(name, "message-summary") {
+		log.Info("pbx notify: no subscription for this event; answered 481")
+		_ = tx.Respond(sip.NewResponseFromRequest(req, 481, "Subscription Does Not Exist", nil))
+		return
+	}
+	waiting, voice := parseMessageSummary(req.Body())
+	log.Info("pbx: message waiting", "waiting", waiting, "voice", voice)
+	_ = tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
+}
+
+// parseMessageSummary reads the two lines of an RFC 3842 body that matter:
+// "Messages-Waiting: yes" and "Voice-Message: 2/0 (0/0)" (new/old, urgent
+// in brackets). A body without them — CUCM's first NOTIFY after a REGISTER
+// can be a bare "Messages-Waiting: no" — reads as nothing waiting.
+func parseMessageSummary(body []byte) (waiting bool, voice string) {
+	for _, l := range strings.Split(string(body), "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case "messages-waiting":
+			waiting = strings.EqualFold(v, "yes")
+		case "voice-message":
+			voice = v
+		}
+	}
+	return waiting, voice
 }
 
 // flowAlive reports whether the TLS connection a rewritten registration
@@ -785,6 +857,12 @@ func (s *Server) serveDialog(in *diago.DialogServerSession) {
 		return
 	}
 	legs := legs{callerTrunk: s.isTrunkLeg(in)}
+	if delayedOffer(in.InviteRequest) {
+		// The callee is offered the PBX codec set (there is no caller SDP
+		// to narrow it from) and the caller is then offered, in our 200
+		// OK, the one codec the callee took.
+		log.Info("invite: delayed offer (no SDP); the caller is offered the callee's codec in the 200 OK", "caller_trunk", legs.callerTrunk)
+	}
 
 	if d.Target == routing.Echo {
 		s.echo(log, in, legs.callerTrunk)
@@ -1113,6 +1191,18 @@ func ParseCodecs(list string) ([]media.Codec, error) {
 		return nil, errors.New("no codecs")
 	}
 	return out, nil
+}
+
+// lateOfferCodecs is what a delayed-offer caller is offered in our 200 OK:
+// the callee's codec first, then the rest of the PBX set as fallbacks.
+func lateOfferCodecs(first media.Codec, set []media.Codec) []media.Codec {
+	out := []media.Codec{first}
+	for _, c := range set {
+		if !sameCodec(c, first) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // callTouchesTrunk reports whether either leg is the PBX trunk. When it is,
@@ -1545,7 +1635,23 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		return err
 	}
 	legA.codec, legB.codec = negotiated, negotiated
-	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: []media.Codec{negotiated},
+	// With an early offer the caller is answered with the callee's codec
+	// alone: it is one the caller offered, so it cannot refuse. With a
+	// delayed offer the caller answers OUR offer in its ACK, and an offer
+	// of that one codec is too narrow for an exchange: CUCM, asked for
+	// G.722 alone, answered with an ACK carrying no SDP and a BYE a few
+	// milliseconds later (lines bench 2026-10-17 10:53), while the same
+	// cluster takes PCMU from a G.722-first list. So the late offer is the
+	// whole PBX set with the callee's codec first; if the exchange picks
+	// another, the callee is moved onto it by re-INVITE below — the same
+	// move a transfer makes (renegotiateCodec) — so the relay still never
+	// transcodes.
+	delayed := delayedOffer(in.InviteRequest)
+	answerCodecs := []media.Codec{negotiated}
+	if delayed {
+		answerCodecs = lateOfferCodecs(negotiated, s.cfg.trunkCodecs())
+	}
+	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
 		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)}); err != nil {
 		log.Error("answer caller", "err", err)
 		_ = out.Hangup(out.Context())
@@ -1569,7 +1675,23 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		return err
 	}
 	defer out.Close()
-	log.Info("bridged", "dst", dst.String(), "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
+	// The late offer's answer: if the exchange took a codec other than the
+	// callee's, move the callee onto it now that its dialog is confirmed.
+	// A callee that will not move leaves two legs on different codecs,
+	// which the copy-relay cannot bridge, so that ends the call.
+	if delayed {
+		if got := media.CodecAudioFromSession(in.Media().MediaSession()); !sameCodec(got, negotiated) {
+			log.Info("late offer: the caller took another codec; moving the callee to it", "callee_had", negotiated.Name, "caller_took", got.Name)
+			if err := renegotiateCodec(ctx, legB, got); err != nil {
+				log.Error("late offer: the callee would not move to the caller's codec; no audio is possible", "codec", got.Name, "err", err)
+				_ = out.Hangup(out.Context())
+				_ = in.Hangup(in.Context())
+				return fmt.Errorf("late offer answered with %s and the callee would not move: %w", got.Name, err)
+			}
+			legA.codec, legB.codec = got, got
+		}
+	}
+	log.Info("bridged", "dst", dst.String(), "codec", legA.codec.Name, "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
 
 	// Media relay: our own pumps rather than diago's Bridge, so every leg
 	// reports what it read and wrote — a phone that receives nothing while

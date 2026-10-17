@@ -113,6 +113,25 @@ if [ "$SCENARIO" = register ] || [ "$SCENARIO" = all ]; then
     i=$((i+1)); [ $i -le 20 ] || { echo "   FAIL: the PBX never qualified a line as reachable (OPTIONS unanswered)"; ok=0; break; }
     sleep 1
   done
+  # The exchange tells every registered line about its mailbox with an
+  # unsolicited message-summary NOTIFY (RFC 3842) — CUCM on each REGISTER,
+  # Asterisk once the endpoint has a mailbox (voicemail.conf) — and expects
+  # 200 OK. Until 2026-10-17 diago answered these 400 Bad Request, which
+  # CUCM logged against the line.
+  i=0
+  until $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -q "pbx: message waiting.*line=211"; do
+    i=$((i+1)); [ $i -le 20 ] || break
+    sleep 1
+  done
+  if $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -q "pbx: message waiting.*line=211"; then
+    echo "   the PBX's message-waiting NOTIFY for line 211 was answered 200: $($COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -o 'message waiting.*line=211.*' | head -1 | sed 's/source=.*//')"
+  else
+    echo "   FAIL: no message-waiting NOTIFY for line 211 was answered"
+    $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -i notify | tail -3 | sed 's/^/   /'; ok=0
+  fi
+  if $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -q 'Failed to handle request.*req.method=NOTIFY'; then
+    echo "   FAIL: a NOTIFY still fell through to diago and was answered 400"; ok=0
+  fi
   [ "$ok" = 1 ] && echo "PASS register" || { echo "FAIL register"; fail=1; }
 fi
 
@@ -182,7 +201,7 @@ if [ "$SCENARIO" = badpass ] || [ "$SCENARIO" = all ]; then
     echo "   FAIL: a wrong credential did not produce a refusal"
     printf '%s\n' "$blog" | grep -i "pbx line" | tail -5 | sed 's/^/   /'; ok=0
   fi
-  # Once, not once a second: a fleet retrying a bad password is how an
+  # Once, not once a second: devices retrying a bad password is how an
   # account gets locked out on a real exchange.
   n="$(printf '%s' "$blog" | grep -c "pbx line: refused" || true)"
   if [ "$n" -le 1 ]; then

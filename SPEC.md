@@ -719,6 +719,10 @@ on by config — see §7.4.
        early offer natively, which consumes media resources. Supporting
        delayed offer properly is ours to do and is listed under "Much
        later"; the checkbox is the deployment work-around.
+       *Superseded 2026-10-17:* the server now answers a delayed offer
+       (the "Much later" entry, done — item 3c's CUCM bench forced it,
+       since a third-party SIP line has no such tick box). The tick box is
+       no longer required on the trunk either, and only costs an MTP.
      - **Check the region codec preference for the trunk.** We offer
        G.722, PCMU and PCMA and have **no G.729**. CUCM deployments
        commonly set inter-region bandwidth to G.729, and a region pairing
@@ -828,7 +832,7 @@ on by config — see §7.4.
      that does not exist the moment iOS suspends the app — exactly the
      problem this product exists to solve — and it would put a PBX
      credential inside a public App Store binary. From the exchange's
-     point of view this server is therefore a fleet of third-party SIP
+     point of view this server is therefore a set of third-party SIP
      devices, one registration per device, **held around the clock**
      whether the phone is awake, asleep or in a drawer. The INVITE always
      lands somewhere alive and the wake path is unchanged. **The app leg
@@ -856,7 +860,7 @@ on by config — see §7.4.
      after a 401/403 retry**, so a wrong password logs once instead of
      hammering the exchange, and start-up is jittered so fifty lines do
      not stampede one node. The refresh deadline is a time of day, watched
-     by one 10 s sweep for the fleet, because the timer it sleeps on counts
+     by one 10 s sweep for all lines, because the timer it sleeps on counts
      only time the machine is awake while the exchange's lease counts the
      clock: an 18-minute clamshell sleep on the dev Mac left line 201 with
      no contact on the PBX for three minutes and two calls refused there
@@ -929,9 +933,17 @@ on by config — see §7.4.
      without disturbing another's call. `make harness-pbx-lines`.
      What it cannot prove, and what therefore stays open until a CUCM
      exists: that CUCM matches a registration to a third-party device by
-     digest user and DN; its realm and challenge shape; line-side early
-     offer (which, if it holds, retires the Early Offer checkbox of item 3
-     for inbound calls); whether it ticks *MTP Required* and what that
+     digest user and DN; ~~its realm and challenge shape~~ (*answered
+     2026-10-17:* realm `ccmsipline`, MD5, no qop — and one nonce handed
+     to every line that registers in the same instant, so the second to
+     answer it is re-challenged with a new nonce and no `stale=true`;
+     the REGISTER client answers a new nonce and calls only a repeated
+     one a refusal, `sipreg_challenge_test.go`); ~~line-side early
+     offer~~ (*answered 2026-10-17:* CUCM sends a line a **delayed** offer,
+     no SDP at all, which the server now answers — the "Much later"
+     delayed-offer entry, done — and it also sends each line an
+     unsolicited message-summary NOTIFY on every REGISTER, now answered
+     200 instead of 400); whether it ticks *MTP Required* and what that
      does to DTMF (we offer `telephone-event/8000` at PT 101 on both legs
      and the relay copies payload verbatim, so a PT mismatch across the
      bridge is the thing to watch); whether it accepts REFER from a
@@ -1877,20 +1889,46 @@ old phase labels still resolve. None of this is on the roadmap.
     one reason to revisit §4.5.
   - The APNS sibling would also have to pass the §7.1 transport conformance
     suite on-device.
-- **Delayed-offer INVITEs on the trunk (optional).** An INVITE with no SDP,
-  where the answerer makes the offer in its 200 OK and the caller answers in
-  the ACK (RFC 3261 §13.2.1). CUCM sends these unless Early Offer is enabled
-  on the trunk (§6 near-term item 3), and other PBXs do too. We refuse them:
-  diago needs the INVITE body, and the bridge narrows the callee's offer from
-  the caller's SDP, so there is nothing to narrow from. Supporting it means
-  the B2BUA generating its own offer toward the caller before it knows what
-  the callee will take — which is exactly the tandem-coding problem the
-  copy-relay exists to avoid, since the two legs could then settle on
-  different codecs. The honest options are to offer our full set and re-INVITE
-  the caller once the callee has chosen (a second round trip on every such
-  call), or to keep requiring early offer and document the checkbox. Not
-  scheduled: the checkbox costs nothing and the alternative touches the one
-  design decision the media path is built on.
+- **Delayed-offer INVITEs on the PBX leg.** *Done 2026-10-17
+  (`feature/delayed-offer-mwi`).* An INVITE with no SDP, where the answerer
+  makes the offer in its 200 OK and the caller answers in the ACK (RFC 3261
+  §13.2.1). This entry used to say we refuse them, because the B2BUA would
+  have to make an offer before knowing what the callee takes — the
+  tandem-coding problem the copy-relay exists to avoid. That was the wrong
+  order of events. The callee is dialled first and answers with its codec,
+  and only then is the caller answered: so the late offer leads with the
+  codec the callee took, and the relay never transcodes. It is **not** that
+  one codec alone — the first cut was, and CUCM answered a G.722-only
+  offer with an ACK carrying no SDP and a BYE a few milliseconds later
+  (10:53 the same day), while taking PCMU from a G.722-first list. So the
+  200 OK offers the callee's codec first and the rest of `-trunk-codecs`
+  behind it, and when the exchange picks one of the others the callee is
+  moved onto it by re-INVITE before the bridge starts — the same move a
+  transfer makes (`renegotiateCodec`), one extra round trip on the app
+  leg and only when the exchange disagrees. A deployment whose cluster
+  always picks G.711 avoids even that by ordering `-trunk-codecs`
+  `pcmu,pcma,g722`. With no caller SDP to narrow from, the callee is
+  offered the PBX codec set. What made it stop being
+  optional: CUCM sends a delayed offer to every third-party SIP line (item
+  3c), and a line has no Early Offer tick box — on the 2026-10-17 CUCM
+  bench every inbound call rang the app and died the moment it was
+  answered ("no sdp present in INVITE"). The change is in diago's
+  `AnswerOptions` and `ReadAck` (`vendor/PATCHES.md`) and one check in the
+  bridge; the early-offer path is untouched by construction, since the
+  same "INVITE has no body" test chooses between them in both places.
+  Proof: `make harness-delayed-offer` (SIPp plays the PBX, as Asterisk
+  never sends one) and the in-process tests in `b2bua/delayed_offer_test.go`,
+  which drive a real B2BUA on loopback through both paths; the gate runs
+  the call twice, the PBX answering G.722 and then PCMU, and asserts the
+  re-INVITE in the second. A callee that will not move (its re-INVITE
+  refused) ends the call with both codecs named rather than bridge silence.
+- **Message-waiting indicator in the app.** CUCM tells every registered
+  line about its mailbox with an unsolicited message-summary NOTIFY (RFC
+  3842) on each REGISTER and on each change; Asterisk does the same once
+  an endpoint has a mailbox. Since 2026-10-17 the server answers it 200 OK
+  and logs the state (it answered 400 before, which CUCM logged against
+  the line). Showing it on the phone needs a wire field, a protocol bump
+  and an app release. Not scheduled.
 - **Best-effort SRTP on the trunk (optional).** `-trunk-srtp=sdes` is
   all-or-nothing by design (item 3a): a PBX without SDES refuses the SAVP
   offer with 488, because RFC 4568 puts crypto on a secure m-line and there
@@ -2290,9 +2328,11 @@ suite once on-device. Switching siblings changes delivery, not behaviour.
     INVITE challenge is answered; (d) **DTMF both ways** (the digits reach
     an IVR or a phone's display), noting whether CUCM inserted an MTP;
     (e) hold and blind transfer to a CUCM extension — if REFER is refused,
-    the server must complete it and the call must survive; (f) whether
-    CUCM's inbound INVITE carries SDP (early offer), which decides whether
-    item 3's Early Offer checkbox is still needed; (g) a deliberately
+    the server must complete it and the call must survive; (f) ~~whether
+    CUCM's inbound INVITE carries SDP~~ — *answered 2026-10-17:* it does
+    not (delayed offer) and the server answers it; check instead that the
+    200 OK offers the app's one codec and the call has audio both ways;
+    (g) a deliberately
     wrong digest password — the line latches refused, logs once, and no
     other line is disturbed; (h) if the cluster has more than one node,
     which node the INVITEs arrive from, which is the input to the

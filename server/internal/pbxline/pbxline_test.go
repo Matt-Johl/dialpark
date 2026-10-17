@@ -515,8 +515,8 @@ func TestTheTickDoesNotDoubleARefreshThatFiredOnTime(t *testing.T) {
 	}
 }
 
-// A fleet waking from one sleep is due all at once. The scatter used for the
-// fleet's first REGISTER spreads the catch-up the same way.
+// Lines waking from one sleep are due all at once. The scatter used for the
+// first REGISTERs spreads the catch-up the same way.
 func TestAnOverdueRefreshIsScatteredLikeAStart(t *testing.T) {
 	f := newFakeRegistrar(nil)
 	clock := &fakeClock{t: time.Date(2026, 10, 2, 14, 21, 31, 0, time.UTC)}

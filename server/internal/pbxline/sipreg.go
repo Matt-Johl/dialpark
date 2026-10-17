@@ -31,6 +31,9 @@ type SIPRegistrar struct {
 	// re-registration to carry the same Call-ID with a higher CSeq, which
 	// is how the PBX tells a refresh from a new binding.
 	reqs map[string]*sip.Request
+	// sendFn is the wire: r.send, or a fake in the tests that pin the
+	// challenge sequences an exchange sends (sipreg_challenge_test.go).
+	sendFn func(context.Context, *sip.Request) (*sip.Response, error)
 }
 
 // SIPConfig describes where the REGISTERs go and what they advertise.
@@ -61,8 +64,14 @@ func NewSIPRegistrar(cfg SIPConfig) (*SIPRegistrar, error) {
 	if cfg.Domain == "" {
 		cfg.Domain = cfg.Registrar.Host
 	}
-	return &SIPRegistrar{cfg: cfg, reqs: map[string]*sip.Request{}}, nil
+	r := &SIPRegistrar{cfg: cfg, reqs: map[string]*sip.Request{}}
+	r.sendFn = r.send
+	return r, nil
 }
+
+// maxChallengeAnswers bounds how many fresh challenges one registration
+// answers before it is called refused (see register).
+const maxChallengeAnswers = 3
 
 // Register sends one REGISTER for the line, answering a digest challenge if
 // the PBX makes one, and reports the lifetime it granted.
@@ -84,7 +93,7 @@ func (r *SIPRegistrar) register(ctx context.Context, l Line, expiry time.Duratio
 	clearAuth(req)
 	setExpires(req, expiry)
 
-	res, err := r.send(ctx, req)
+	res, err := r.sendFn(ctx, req)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -98,19 +107,41 @@ func (r *SIPRegistrar) register(ctx context.Context, l Line, expiry time.Duratio
 			return Registration{}, &Refused{Status: res.StatusCode, Reason: "423 without a usable Min-Expires"}
 		}
 		setExpires(req, min)
-		if res, err = r.send(ctx, req); err != nil {
+		if res, err = r.sendFn(ctx, req); err != nil {
 			return Registration{}, err
 		}
 	}
 
-	var realm string
-	if isChallenge(res) {
+	// Answer the challenge — and, within a bound, a fresh one after it.
+	//
+	// A second challenge after we have answered is how a wrong password
+	// looks, and that is the one failure that must not be retried: devices
+	// retrying a bad password is how an exchange ends up locking an
+	// account out. But it is also how CUCM looks when several lines
+	// register at once: it hands concurrent REGISTERs the SAME nonce, and
+	// once one line's answer has consumed it the others are re-challenged
+	// with a new nonce, no stale=true, same 401 (bench 2026-10-17 11:54,
+	// four lines in 300 ms, line 10910 latched "credential refused" with
+	// a correct password). The two are told apart by the nonce: a new one
+	// is a new question and is answered; the same one back again is the
+	// exchange saying our answer was wrong. maxChallengeAnswers keeps an
+	// exchange that rotates its nonce on every refusal from being asked
+	// for ever.
+	var realm, answered string
+	for n := 0; isChallenge(res); n++ {
 		chal, hdr, err := challenge(res)
 		if err != nil {
 			// An unparseable or unsupported challenge (MD5-sess, a
 			// digest algorithm we have no hash for) is a provisioning
 			// fault, not a blip: retrying sends the identical request.
 			return Registration{}, &Refused{Status: res.StatusCode, Reason: err.Error()}
+		}
+		if n > 0 && !chal.Stale && chal.Nonce == answered {
+			return Registration{}, &Refused{Status: res.StatusCode, Reason: "credential refused"}
+		}
+		if n >= maxChallengeAnswers {
+			return Registration{}, &Refused{Status: res.StatusCode,
+				Reason: fmt.Sprintf("credential refused (%d challenges, each with a new nonce)", n+1)}
 		}
 		realm = chal.Realm
 		auth, err := authorization(chal, sip.REGISTER.String(), req.Recipient.String(), l.DigestUser, l.Secret)
@@ -119,15 +150,10 @@ func (r *SIPRegistrar) register(ctx context.Context, l Line, expiry time.Duratio
 		}
 		req.RemoveHeader(hdr)
 		req.AppendHeader(sip.NewHeader(hdr, auth))
+		answered = chal.Nonce
 
-		if res, err = r.send(ctx, req); err != nil {
+		if res, err = r.sendFn(ctx, req); err != nil {
 			return Registration{}, err
-		}
-		// Challenged again after answering: the credential is wrong. This
-		// is the one failure that must not be retried — a fleet retrying a
-		// bad password is how an exchange ends up locking an account out.
-		if isChallenge(res) {
-			return Registration{}, &Refused{Status: res.StatusCode, Reason: "credential refused"}
 		}
 	}
 

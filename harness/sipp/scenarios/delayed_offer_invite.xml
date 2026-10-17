@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  A delayed-offer INVITE from the PBX (harness/delayed_offer_test.sh; SPEC
+  §6 item 3c). SIPp stands in for CUCM at the server's trunk listener: its
+  INVITE to app 211 carries no SDP, as CUCM's to a third-party SIP line
+  does (bench 2026-10-17). The server must ring the app, and once the app
+  answers, put ITS offer in the 200 OK — the codec the app took (G.722
+  here) first, then the rest of the PBX set as fallbacks — and take the
+  answer from this ACK. Run with -rtp_echo so whatever the app sends comes
+  straight back to it: the app's recording of its own tone is the proof the
+  media path was built from the ACK's SDP.
+
+  The ACK answers with -key pt / -key codec (9 G722, the app's own codec;
+  0 PCMU, which makes the server move the app onto PCMU by
+  re-INVITE before bridging — what CUCM did on 2026-10-17 10:53, when a
+  G.722-only offer got an ACK with no SDP and a BYE, while the same cluster
+  takes PCMU from a list).
+-->
+<scenario name="delayed_offer_invite">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@dialpark SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, NOTIFY
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <!-- The 200 OK is the offer: G.722 (PT 9), the app's codec, FIRST, then
+       whatever else the PBX set holds. A 200 with no SDP, or one that does
+       not lead with the app's codec, fails the scenario here. -->
+  <recv response="200" rtd="1" rrs="true" timeout="30000">
+    <action>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP 9( [0-9]+)*[\r\n]" search_in="body" check_it="true" assign_to="offer"/>
+      <ereg regexp="a=rtpmap:9 G722/8000" search_in="body" check_it="true" assign_to="g722"/>
+      <ereg regexp="a=rtpmap:0 PCMU/8000" search_in="body" check_it="true" assign_to="pcmu"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=pbx 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP [pt] 101
+      a=rtpmap:[pt] [codec]/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-16
+      a=sendrecv
+    ]]>
+  </send>
+  <!-- The call: -d milliseconds of the app's tone echoed back to it. -->
+  <pause/>
+  <send retrans="500">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="5000"/>
+  <!-- Unused references keep SIPp quiet about assigned-but-unread variables. -->
+  <Reference variables="offer,g722,pcmu"/>
+</scenario>
