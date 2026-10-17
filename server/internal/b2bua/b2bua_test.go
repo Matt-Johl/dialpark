@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 
@@ -119,5 +120,17 @@ func TestNewRequiresTLSAndHost(t *testing.T) {
 	}
 	if s.cfg.Port != 5061 || s.cfg.RingTimeout == 0 || s.cfg.MinExpires != 60 {
 		t.Fatalf("defaults not applied: %+v", s.cfg)
+	}
+}
+
+// -peer-timeout 0 means off. The config's zero means "the default", so
+// main maps the flag's zero to a negative value, which withDefaults must
+// leave alone and startLocked must read as "no watchdog".
+func TestANegativePeerTimeoutStaysOffThroughDefaults(t *testing.T) {
+	if got := (Config{PeerTimeout: -1}).withDefaults().PeerTimeout; got >= 0 {
+		t.Fatalf("withDefaults turned the off value into %v", got)
+	}
+	if got := (Config{}).withDefaults().PeerTimeout; got != 60*time.Second {
+		t.Fatalf("zero must still take the default, got %v", got)
 	}
 }

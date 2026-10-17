@@ -130,6 +130,18 @@ upstream release named in `modules.txt`; re-apply when bumping.
   first, and one in neither list is accounted under the session's audio
   codec and passed on; upstream dropped every such packet with a warning.
 
+- `dialog_media.go` (`handleMediaUpdate`, `applyLateReInviteAnswerUnsafe`,
+  `pendingReOffer`), `dialog_server_session.go` (`ReadAck`),
+  `dialog_client_session.go` (`handleReInviteACK`) — a re-INVITE with no
+  SDP asks us for the offer, and that offer states OUR direction: it comes
+  from a fresh fork (no negotiated direction, a new SDP version), and the
+  ACK's answer is applied to that fork and swapped in as a media update,
+  with the application told. Upstream answered a bodiless re-INVITE with
+  the current session's SDP, whose direction was the one last negotiated:
+  after CUCM's hold (inactive) its resume — a bodiless re-INVITE — got
+  inactive back and the call never came back (lines bench 2026-10-17
+  14:07). `make harness-cucm-hold`.
+
 ## github.com/emiago/sipgo
 
 - `dialog_client.go` (`inviteCancel`) — cancelling an INVITE watches the

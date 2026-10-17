@@ -175,6 +175,13 @@ offer `telephone-event/8000`, and the relay forwards each event under the
 far leg's event payload type rather than as audio. `make harness-dtmf`
 proves digits both ways against Asterisk (`LINES=1` for lines mode).
 
+CUCM holds a call with a re-INVITE carrying `a=inactive` and resumes it
+with a re-INVITE carrying no SDP at all, asking the server for the offer.
+That offer states the server's own direction, sendrecv, and the ACK's
+answer is applied as a media update; `make harness-cucm-hold` replays the
+exchange with SIPp. The held app hears the server's music (SPEC §4.4 rule
+8b), not the PBX's.
+
 ### The licence
 
 The server enforces a product licence (SPEC §4.9): a number of app devices

@@ -142,7 +142,8 @@ type Config struct {
 	// (bridgedCall.qualifyLegs). A B2BUA cannot rely on a BYE to end a
 	// call: a phone that crashes or goes out of range sends none, and its
 	// dialog then has nothing to cancel it, so the call and its relay
-	// outlive everyone on it. 0 = off.
+	// outlive everyone on it. Zero takes the default (60 s); a negative
+	// value turns the watchdog off (the flag's "0 = off", mapped in main).
 	PeerTimeout time.Duration
 	MinExpires  int
 	MaxExpires  int

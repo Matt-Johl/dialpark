@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,11 @@ type DialogMedia struct {
 
 	onClose       func() error
 	onMediaUpdate func(*DialogMedia)
+
+	// pendingReOffer (Dialler patch) is the fork our 200 OK to a bodiless
+	// re-INVITE offered from; the ACK's answer is applied to it and it is
+	// swapped in (applyLateReInviteAnswerUnsafe). Nil otherwise.
+	pendingReOffer *media.MediaSession
 
 	closed bool
 }
@@ -202,18 +208,49 @@ func (d *DialogMedia) handleMediaUpdate(req *sip.Request, tx sip.ServerTransacti
 	defer d.mu.Unlock()
 	d.remoteContactTarget = req.Contact().Clone()
 
-	// When body is not present this can mean client is doing keep alive
-	// Still offer needs to be responded
-	if req.Body() != nil {
-		if err := d.sdpReInviteUnsafe(req.Body()); err != nil {
-			return tx.Respond(sip.NewResponseFromRequest(req, sip.StatusRequestTerminated, "Request Terminated - "+err.Error(), nil))
+	d.pendingReOffer = nil
+	if len(req.Body()) == 0 {
+		// Dialler patch: a re-INVITE without SDP asks US for the offer
+		// (RFC 3261 §14.2). Upstream answered it with the current session's
+		// SDP, whose direction is the one LAST NEGOTIATED — after a hold,
+		// inactive — so the peer could only answer inactive and the call
+		// stayed held. CUCM resumes a held call exactly this way (lines
+		// bench 2026-10-17 14:07, CSeq 103..107: every re-INVITE after the
+		// hold came without a body and got our inactive back). An offer
+		// states OUR direction, which is the session's preference
+		// (sendrecv unless this side holds), so it comes from a fresh fork,
+		// which carries no negotiated direction and a new SDP version. The
+		// answer arrives in the ACK and is applied to that fork.
+		msess := d.mediaSession.Fork()
+		// The codec in use first, then the rest: the far leg of a bridge
+		// is on that codec and the relay does not transcode, so the peer
+		// is steered to keep it and only falls back if it must.
+		if cur := media.CodecAudioFromSession(d.mediaSession); cur.Name != "" {
+			codecs := make([]media.Codec, 0, len(msess.Codecs)+1)
+			codecs = append(codecs, cur)
+			for _, c := range msess.Codecs {
+				if !(strings.EqualFold(c.Name, cur.Name) && c.SampleRate == cur.SampleRate && c.NumChannels == cur.NumChannels) {
+					codecs = append(codecs, c)
+				}
+			}
+			msess.Codecs = codecs
 		}
+		d.pendingReOffer = msess
+		sd := msess.LocalSDP()
+		res := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", sd)
+		res.AppendHeader(contactHDR)
+		res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+		return tx.Respond(res)
+	}
 
-		if d.onMediaUpdate != nil {
-			d.mu.Unlock()
-			d.onMediaUpdate(d)
-			d.mu.Lock()
-		}
+	if err := d.sdpReInviteUnsafe(req.Body()); err != nil {
+		return tx.Respond(sip.NewResponseFromRequest(req, sip.StatusRequestTerminated, "Request Terminated - "+err.Error(), nil))
+	}
+
+	if d.onMediaUpdate != nil {
+		d.mu.Unlock()
+		d.onMediaUpdate(d)
+		d.mu.Lock()
 	}
 
 	// Reply with updated SDP
@@ -222,6 +259,25 @@ func (d *DialogMedia) handleMediaUpdate(req *sip.Request, tx sip.ServerTransacti
 	res.AppendHeader(contactHDR)
 	res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	return tx.Respond(res)
+}
+
+// applyLateReInviteAnswerUnsafe (Dialler patch) applies the SDP answer that
+// arrived in the ACK to our 200 OK on a bodiless re-INVITE: to the fork that
+// offer was made from, which is then swapped in like any re-INVITE result.
+// Caller holds d.mu and notifies onMediaUpdate after releasing it.
+func (d *DialogMedia) applyLateReInviteAnswerUnsafe(body []byte) error {
+	msess := d.pendingReOffer
+	d.pendingReOffer = nil
+	if msess == nil {
+		msess = d.mediaSession.Fork()
+	}
+	if err := msess.RemoteSDP(body); err != nil {
+		return fmt.Errorf("late re-INVITE answer: %w", err)
+	}
+	if err := msess.Finalize(); err != nil {
+		return fmt.Errorf("late re-INVITE answer: %w", err)
+	}
+	return d.replaceRTPSessionUnsafe(msess)
 }
 
 // Must be protected with lock

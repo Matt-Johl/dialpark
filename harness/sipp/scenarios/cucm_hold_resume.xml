@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  CUCM's hold and resume on a third-party line, replayed by SIPp
+  (harness/cucm_hold_test.sh; SPEC §7.3 item 10 e). Taken from the lines
+  bench of 2026-10-17 14:06, call d492e900:
+
+    INVITE with no SDP (delayed offer)      → 200 with our offer → ACK with the answer
+    re-INVITE  a=inactive, c=0.0.0.0        the phone pressed hold; we answer inactive
+    re-INVITE  with NO SDP                   the phone pressed resume: CUCM asks US for
+                                             the offer, and it must say a=sendrecv —
+                                             the server used to echo the held leg's
+                                             inactive here, and the call never came back
+    ACK        a=sendrecv, media address     CUCM's answer; media flows again
+
+  -rtp_echo sends the app's audio straight back during the resumed part,
+  so the app's recording proves the resume carried media, not just SDP.
+-->
+<scenario name="cucm_hold_resume">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@dialpark SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, NOTIFY
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="1" rrs="true" timeout="30000">
+    <action>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP 9( [0-9]+)*[\r\n]" search_in="body" check_it="true" assign_to="offer"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=CiscoSystemsCCM-SIP 1 1 IN IP[local_ip_type] [local_ip]
+      s=SIP Call
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+      a=sendrecv
+    ]]>
+  </send>
+  <!-- Talking: -d ms of echoed tone before the hold. -->
+  <pause/>
+  <!-- Hold: CUCM's shape — inactive, connection address 0.0.0.0. -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 INVITE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=CiscoSystemsCCM-SIP 1 2 IN IP[local_ip_type] [local_ip]
+      s=SIP Call
+      c=IN IP4 0.0.0.0
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+      a=inactive
+    ]]>
+  </send>
+  <recv response="200" timeout="5000">
+    <action>
+      <ereg regexp="a=inactive" search_in="body" check_it="true" assign_to="held"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 ACK
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <!-- Held for 4 s: the app hears the server's music. -->
+  <pause milliseconds="4000"/>
+  <!-- Resume: CUCM's shape — a re-INVITE with no SDP. The 200 OK is OUR
+       offer and must carry a=sendrecv, or the call stays held. -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 3 INVITE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="5000">
+    <action>
+      <ereg regexp="a=sendrecv" search_in="body" check_it="true" assign_to="resumed"/>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP 9( [0-9]+)*[\r\n]" search_in="body" check_it="true" assign_to="offer2"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 3 ACK
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=CiscoSystemsCCM-SIP 1 3 IN IP[local_ip_type] [local_ip]
+      s=SIP Call
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+      a=sendrecv
+    ]]>
+  </send>
+  <!-- Talking again: -d ms of echoed tone after the resume. -->
+  <pause/>
+  <send retrans="500">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 4 BYE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="5000"/>
+  <Reference variables="offer,held,resumed,offer2"/>
+</scenario>

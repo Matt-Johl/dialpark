@@ -326,6 +326,7 @@ func (d *DialogServerSession) answerLateSession(rtpSess *media.RTPSession) error
 
 func (d *DialogServerSession) ReadAck(req *sip.Request, tx sip.ServerTransaction) error {
 	// Check do we have some session
+	notify := false
 	err := func() error {
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -338,6 +339,17 @@ func (d *DialogServerSession) ReadAck(req *sip.Request, tx sip.ServerTransaction
 			return nil
 		}
 		body := req.Body()
+		if body != nil && contentType.Value() == "application/sdp" && d.pendingReOffer != nil {
+			// Dialler patch: the answer to our offer on a bodiless
+			// re-INVITE (see handleMediaUpdate), not the initial late offer
+			// below: it goes to the fork that made the offer and is swapped
+			// in, and the application is told as for any media update.
+			if err := d.applyLateReInviteAnswerUnsafe(body); err != nil {
+				return err
+			}
+			notify = true
+			return nil
+		}
 		if body != nil && contentType.Value() == "application/sdp" {
 			// This is Late offer response
 			if err := sess.RemoteSDP(body); err != nil {
@@ -359,6 +371,14 @@ func (d *DialogServerSession) ReadAck(req *sip.Request, tx sip.ServerTransaction
 	if err != nil {
 		e := d.Hangup(d.Context())
 		return errors.Join(err, e)
+	}
+	if notify {
+		d.mu.Lock()
+		cb := d.onMediaUpdate
+		d.mu.Unlock()
+		if cb != nil {
+			cb(&d.DialogMedia)
+		}
 	}
 
 	return d.DialogServerSession.ReadAck(req, tx)

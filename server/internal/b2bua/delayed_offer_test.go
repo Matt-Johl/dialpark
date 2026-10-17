@@ -370,3 +370,110 @@ func TestDelayedOfferWithNoAnswerInTheAckIsEnded(t *testing.T) {
 		t.Fatal("the server kept a late-offer call whose ACK had no SDP")
 	}
 }
+
+// CUCM's hold and resume on a line (bench 2026-10-17 14:06, call d492e900):
+// hold is a re-INVITE with a=inactive and c=0.0.0.0, resume a re-INVITE
+// with NO SDP — the exchange asks us for the offer. diago answered that
+// offer with the direction last negotiated, inactive, so CUCM could only
+// answer inactive and the call stayed held for ever. The offer must state
+// our own direction, sendrecv, carry a new SDP version, and the ACK's
+// answer must take effect: media flows again on the address it names.
+func (c *pbxClient) reInvite(t *testing.T, ctx context.Context, body []byte) *sip.Response {
+	t.Helper()
+	req := sip.NewRequest(sip.INVITE, c.dlg.InviteResponse.Contact().Address)
+	if body != nil {
+		req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+		req.SetBody(body)
+	}
+	res, err := c.dlg.Do(ctx, req)
+	if err != nil {
+		t.Fatalf("re-INVITE: %v", err)
+	}
+	return res
+}
+
+func (c *pbxClient) ackReInvite(t *testing.T, body []byte) {
+	t.Helper()
+	ack := sip.NewRequest(sip.ACK, c.dlg.InviteResponse.Contact().Address)
+	if body != nil {
+		ack.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+		ack.SetBody(body)
+	}
+	if err := c.dlg.WriteRequest(ack); err != nil {
+		t.Fatalf("ack re-INVITE: %v", err)
+	}
+}
+
+var sdpVersion = regexp.MustCompile(`(?m)^o=\S+ \d+ (\d+) `)
+
+func versionOf(t *testing.T, sdp []byte) int {
+	t.Helper()
+	m := sdpVersion.FindSubmatch(sdp)
+	if m == nil {
+		t.Fatalf("no o= line in:\n%s", sdp)
+	}
+	v, _ := strconv.Atoi(string(m[1]))
+	return v
+}
+
+func TestABodilessReInviteGetsAnOfferInOurDirectionAndTheCallResumes(t *testing.T) {
+	trunkAddr := startTrunkServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pbx := newPBXClient(t)
+	sock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sock.Close()
+	port := sock.LocalAddr().(*net.UDPAddr).Port
+
+	// A delayed-offer call, as CUCM places it, with media flowing.
+	res := pbx.invite(t, ctx, trunkAddr, nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("final = %d", res.StatusCode)
+	}
+	serverMedia, _ := mediaOf(t, res.Body())
+	pbx.ack(t, ctx, pcmuSDP(port))
+	if got := echoRTP(t, sock, serverMedia); got < 5 {
+		t.Fatalf("no media before the hold (%d echoed)", got)
+	}
+
+	// Hold, CUCM's shape: inactive and a connection address of 0.0.0.0.
+	hold := []byte("v=0\r\no=CiscoSystemsCCM-SIP 1 2 IN IP4 127.0.0.1\r\ns=SIP Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n" +
+		fmt.Sprintf("m=audio %d RTP/AVP 0\r\n", port) + "a=rtpmap:0 PCMU/8000\r\na=inactive\r\n")
+	res = pbx.reInvite(t, ctx, hold)
+	if res.StatusCode != 200 || !strings.Contains(string(res.Body()), "a=inactive") {
+		t.Fatalf("hold answered %d with:\n%s\nwant 200 and a=inactive", res.StatusCode, res.Body())
+	}
+	heldVersion := versionOf(t, res.Body())
+	pbx.ackReInvite(t, nil)
+
+	// Resume, CUCM's shape: a re-INVITE with no SDP. Our 200 OK is the offer.
+	res = pbx.reInvite(t, ctx, nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("bodiless re-INVITE answered %d", res.StatusCode)
+	}
+	offer := string(res.Body())
+	if !strings.Contains(offer, "a=sendrecv") {
+		t.Fatalf("the offer on a bodiless re-INVITE must state our direction, sendrecv; got:\n%s", offer)
+	}
+	if v := versionOf(t, res.Body()); v <= heldVersion {
+		t.Fatalf("the offer's SDP version %d did not advance past %d", v, heldVersion)
+	}
+	serverMedia, pts := mediaOf(t, res.Body())
+	if len(pts) == 0 || pts[0] != "0" {
+		t.Fatalf("the offer must keep the negotiated codec first, got %v", pts)
+	}
+	// CUCM's answer, in the ACK: sendrecv at the phone's address.
+	pbx.ackReInvite(t, pcmuSDP(port))
+	time.Sleep(100 * time.Millisecond)
+
+	// Media flows again on the address the answer named.
+	if got := echoRTP(t, sock, serverMedia); got < 5 {
+		t.Fatalf("after the resume only %d of 25 packets came back; the call did not resume", got)
+	}
+	if err := pbx.dlg.Bye(ctx); err != nil {
+		t.Fatalf("bye: %v", err)
+	}
+}

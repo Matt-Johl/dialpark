@@ -2357,7 +2357,12 @@ suite once on-device. Switching siblings changes delivery, not behaviour.
     INVITE challenge is answered; (d) **DTMF both ways** (the digits reach
     an IVR or a phone's display), noting whether CUCM inserted an MTP (the server side is proven on Asterisk, `make harness-dtmf`, since 2026-10-17; the CUCM run is still to do);
     (e) hold and blind transfer to a CUCM extension — if REFER is refused,
-    the server must complete it and the call must survive; (f) ~~whether
+    the server must complete it and the call must survive (*hold answered
+    2026-10-17:* CUCM holds with a re-INVITE carrying `a=inactive` and
+    `c=0.0.0.0`, and resumes with a re-INVITE carrying **no SDP**; the
+    server now offers its own direction on that, `make harness-cucm-hold`.
+    The held app hears the server's music, rule 8b, not CUCM's MOH;
+    transfer still to run); (f) ~~whether
     CUCM's inbound INVITE carries SDP~~ — *answered 2026-10-17:* it does
     not (delayed offer) and the server answers it; check instead that the
     200 OK offers the app's one codec and the call has audio both ways;

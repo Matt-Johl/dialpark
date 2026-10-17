@@ -638,8 +638,10 @@ func (d *DialogClientSession) handleReInviteACK(req *sip.Request, tx sip.ServerT
 	body := req.Body()
 	if body != nil {
 		// Update media session state under lock, but invoke the app callback after unlock to avoid deadlocks.
+		// Dialler patch: the answer belongs to the fork our bodiless
+		// re-INVITE offer was made from (handleMediaUpdate).
 		d.mu.Lock()
-		err := d.sdpUpdateUnsafe(body)
+		err := d.applyLateReInviteAnswerUnsafe(body)
 		onMediaUpdate := d.onMediaUpdate
 		d.mu.Unlock()
 		if err != nil {

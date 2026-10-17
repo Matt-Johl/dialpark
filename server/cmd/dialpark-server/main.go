@@ -161,7 +161,7 @@ func main() {
 		trunkCodecs:           trunkCodecList,
 		trunkSRTP:             trunkSRTPMode,
 		trunkQualify:          *trunkQualify,
-		peerTimeout:           *peerTimeout,
+		peerTimeout:           peerTimeoutOrOff(*peerTimeout),
 		trunkCert:             *trunkCert,
 		trunkKey:              *trunkKey,
 		trunkCA:               *trunkCA,
@@ -838,4 +838,15 @@ func firstIPv4() string {
 		}
 	}
 	return "127.0.0.1"
+}
+
+// peerTimeoutOrOff maps the flag's "0 = off" onto the B2BUA's config,
+// where zero means "the default" (60 s) and a negative value means off.
+// Until 2026-10-17 the zero went through as zero and came back as the
+// default: the watchdog could not be switched off (CUCM hold bench).
+func peerTimeoutOrOff(d time.Duration) time.Duration {
+	if d == 0 {
+		return -1
+	}
+	return d
 }

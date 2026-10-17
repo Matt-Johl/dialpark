@@ -151,6 +151,12 @@ harness-delayed-offer:
 harness-delayed-offer-opus:
 	OPUS=1 sh harness/delayed_offer_test.sh
 
+# CUCM's hold and resume on a line (SPEC §7.3 item 10 e): hold is a
+# re-INVITE with a=inactive and c=0.0.0.0, resume a re-INVITE with no SDP
+# that asks us for the offer — which must say sendrecv. SIPp plays CUCM.
+harness-cucm-hold:
+	sh harness/cucm_hold_test.sh
+
 # DTMF both ways on a PBX call (SPEC §7.3 item 10 d): digits travel as RFC
 # 4733 telephone-event packets and the relay forwards them as events under
 # the far leg's payload type. The PBX reads three digits the app sends and
@@ -218,7 +224,7 @@ harness-regression:
 	for t in harness-call harness-wake harness-qos \
 	         harness-trunk harness-trunk-srtp harness-trunk-tls harness-trunk-secure \
 	         harness-trunk-stall harness-pbx-hold harness-pbx-unavailable \
-	         harness-hold-music harness-cancel-before-answer harness-delayed-offer harness-delayed-offer-opus harness-dtmf \
+	         harness-hold-music harness-cancel-before-answer harness-delayed-offer harness-delayed-offer-opus harness-cucm-hold harness-dtmf \
 	         harness-admin harness-admin-ui harness-licence; do \
 	  echo "=== $$t"; $(MAKE) $$t || { echo "REGRESSION FAILED: $$t"; exit 1; }; \
 	done; \
