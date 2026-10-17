@@ -1756,6 +1756,21 @@ on by config — see §7.4.
      - `Info.plist`, the Local Network prompt: "on the office network".
      New wording for each, then Matt's Xcode build, then screenshot 05
      retaken at both sizes.
+   14. **In-call keypad (app; noted 2026-10-17).** There is no way to press
+     a digit during a call: the in-call screen has no keypad, so an IVR,
+     a voicemail menu or a conference PIN cannot be answered from the
+     app. The whole path beneath it now exists — both legs negotiate
+     `telephone-event/8000` and the relay forwards digits as RFC 4733
+     events (`feature/dtmf`; on the CUCM bench the 8841's digits reached
+     the app as 30 event packets, 2026-10-17 13:07). baresip sends a
+     digit with `call_send_digit`, as RFC 4733 when negotiated and SIP
+     INFO otherwise, so the app's work is the keypad itself: a button on
+     the in-call screen that opens a 12-key pad, each press sending the
+     key and showing it in a strip above the pad, with the CallKit
+     `playDTMFCallAction` wired to the same send so a digit from the
+     system call screen works too. No server change, no wire change.
+     Verified the same way as the bench: a call to an IVR, and the
+     server's relay line showing `events=N` in the app's direction.
 
 ### Much later (not scheduled)
 
