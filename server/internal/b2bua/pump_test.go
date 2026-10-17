@@ -571,3 +571,142 @@ func TestRelayPacesAFrozenOrSlowedClock(t *testing.T) {
 		})
 	}
 }
+
+// DTMF travels as RFC 4733 telephone-event packets in the audio stream: a
+// key press is a run of packets that all carry the timestamp the press
+// started at, the first with the marker, then three end packets. The
+// relay must forward them under the far leg's event payload type, in the
+// stream's sequence and timeline, and must not read the repeated timestamp
+// as a frozen clock. Before 2026-10-17 they went out under the audio
+// payload type: a burst of noise, and no digit (CUCM checklist item d).
+func eventPacket(seq uint16, ts, ssrc uint32, marker, end bool, digit byte) rtp.Packet {
+	flags := byte(10) // volume
+	if end {
+		flags |= 0x80
+	}
+	return rtp.Packet{
+		Header:  rtp.Header{Version: 2, PayloadType: 101, SequenceNumber: seq, Timestamp: ts, SSRC: ssrc, Marker: marker},
+		Payload: []byte{digit, flags, 0x03, 0x20},
+	}
+}
+
+func dtmfStream() []rtp.Packet {
+	var pkts []rtp.Packet
+	seq, ts := uint16(10), uint32(5000)
+	for i := 0; i < 5; i++ { // 100 ms of audio
+		pkts = append(pkts, packet(seq, ts, 0xd7, i == 0))
+		seq++
+		ts += ulawFrame
+	}
+	start := ts
+	for i := 0; i < 8; i++ { // a 160 ms key press: 8 packets on one timestamp
+		pkts = append(pkts, eventPacket(seq, start, 0xd7, i == 0, false, 5))
+		seq++
+	}
+	for i := 0; i < 3; i++ { // the end, sent three times
+		pkts = append(pkts, eventPacket(seq, start, 0xd7, false, true, 5))
+		seq++
+	}
+	ts += 11 * ulawFrame // audio resumes where the clock would be
+	for i := 0; i < 5; i++ {
+		pkts = append(pkts, packet(seq, ts, 0xd7, false))
+		seq++
+		ts += ulawFrame
+	}
+	return pkts
+}
+
+func runEventPump(t *testing.T, src *fakeSource, dstEvent uint8, hasDst bool) (*fakeSink, *pump) {
+	t.Helper()
+	sink := &fakeSink{}
+	rr := media.NewRTPPacketReader(src, media.CodecAudioUlaw)
+	rw := media.NewRTPPacketWriter(sink, media.CodecAudioUlaw)
+	p := &pump{r: rr, w: rw}
+	p.setPacketPath(rr, rw, media.CodecAudioUlaw)
+	p.srcEvent, p.hasSrcEvent = 101, true
+	p.dstEvent, p.hasDstEvent = dstEvent, hasDst
+	done := make(chan struct{})
+	go func() {
+		p.run(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("relay did not finish")
+	}
+	return sink, p
+}
+
+func TestRelayForwardsDTMFEventsUnderTheFarLegsPayloadType(t *testing.T) {
+	src := &fakeSource{pkts: dtmfStream()}
+	sink, p := runEventPump(t, src, 96, true)
+	out := sink.all()
+	if len(out) != len(src.pkts) {
+		t.Fatalf("forwarded %d of %d packets", len(out), len(src.pkts))
+	}
+	if p.events.Load() != 11 || p.eventsDropped.Load() != 0 {
+		t.Fatalf("events=%d dropped=%d, want 11 forwarded", p.events.Load(), p.eventsDropped.Load())
+	}
+	if p.breaks.Load() != 0 {
+		t.Fatalf("the key press's repeated timestamp was read as a timeline break (%d)", p.breaks.Load())
+	}
+	// Payload types: audio stays 0, events become 96; nothing goes out as 101.
+	for i, o := range out {
+		want := uint8(0)
+		if i >= 5 && i < 16 {
+			want = 96
+		}
+		if o.hdr.PayloadType != want {
+			t.Errorf("packet %d: payload type %d, want %d", i, o.hdr.PayloadType, want)
+		}
+	}
+	// Sequence numbers stay contiguous through the digit.
+	for i := 1; i < len(out); i++ {
+		if out[i].hdr.SequenceNumber != out[i-1].hdr.SequenceNumber+1 {
+			t.Fatalf("packet %d: sequence not contiguous across the digit", i)
+		}
+	}
+	// The event's timestamp is the press start, held for all 11 packets,
+	// and sits where the audio clock was; the marker rides on the first.
+	evTS := out[5].hdr.Timestamp
+	if evTS != out[4].hdr.Timestamp+ulawFrame {
+		t.Errorf("event timestamp %d, want %d (one frame after the last audio)", evTS, out[4].hdr.Timestamp+ulawFrame)
+	}
+	if !out[5].hdr.Marker {
+		t.Error("the first packet of the key press must keep its marker")
+	}
+	for i := 6; i < 16; i++ {
+		if out[i].hdr.Timestamp != evTS {
+			t.Errorf("event packet %d: timestamp %d, want %d held through the press", i, out[i].hdr.Timestamp, evTS)
+		}
+		if out[i].hdr.Marker {
+			t.Errorf("event packet %d carries a marker it did not have", i)
+		}
+	}
+	// Audio after the digit continues on the same timeline, no rebase.
+	if got, want := out[16].hdr.Timestamp, evTS+11*ulawFrame; got != want {
+		t.Errorf("audio after the digit at %d, want %d", got, want)
+	}
+}
+
+func TestRelayDropsDTMFEventsTheFarLegDidNotNegotiate(t *testing.T) {
+	src := &fakeSource{pkts: dtmfStream()}
+	sink, p := runEventPump(t, src, 0, false)
+	out := sink.all()
+	if len(out) != 10 {
+		t.Fatalf("forwarded %d packets, want the 10 audio packets only", len(out))
+	}
+	if p.eventsDropped.Load() != 11 || p.events.Load() != 0 {
+		t.Fatalf("events=%d dropped=%d, want 11 dropped", p.events.Load(), p.eventsDropped.Load())
+	}
+	for i, o := range out {
+		if o.hdr.PayloadType != 0 {
+			t.Errorf("packet %d went out as payload type %d; a digit must never be sent as audio", i, o.hdr.PayloadType)
+		}
+	}
+	// The audio after the digit still follows the clock.
+	if got, want := out[5].hdr.Timestamp, out[4].hdr.Timestamp+12*ulawFrame; got != want {
+		t.Errorf("audio after the dropped digit at %d, want %d", got, want)
+	}
+}

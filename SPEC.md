@@ -944,9 +944,15 @@ on by config — see §7.4.
      delayed-offer entry, done — and it also sends each line an
      unsolicited message-summary NOTIFY on every REGISTER, now answered
      200 instead of 400); whether it ticks *MTP Required* and what that
-     does to DTMF (we offer `telephone-event/8000` at PT 101 on both legs
-     and the relay copies payload verbatim, so a PT mismatch across the
-     bridge is the thing to watch); whether it accepts REFER from a
+     does to DTMF (*corrected 2026-10-17:* until that day the PBX leg was
+     offered **no** telephone-event at all — CUCM read the device as having
+     no DTMF — and the relay rewrote every packet, digits included, to the
+     audio payload type. Since `feature/dtmf` both legs offer
+     `telephone-event/8000`, a caller's own event type is echoed in the
+     answer, and the relay forwards event packets under the far leg's event
+     type, kept out of its clock heuristics; `make harness-dtmf` proves
+     digits both ways on Asterisk, trunk and lines mode); whether it
+     accepts REFER from a
      third-party device (if not, the server completes the transfer itself
      — the fallback already exists); and cluster nodes as INVITE sources.
      Two things keep that from being merely a list of unknowns. **Nothing
@@ -2326,7 +2332,7 @@ suite once on-device. Switching siblings changes delivery, not behaviour.
     rings through the wake, with the caller's name from CUCM; (c) the app
     calls that phone — it arrives as the DN, not as "dialpark", and CUCM's
     INVITE challenge is answered; (d) **DTMF both ways** (the digits reach
-    an IVR or a phone's display), noting whether CUCM inserted an MTP;
+    an IVR or a phone's display), noting whether CUCM inserted an MTP (the server side is proven on Asterisk, `make harness-dtmf`, since 2026-10-17; the CUCM run is still to do);
     (e) hold and blind transfer to a CUCM extension — if REFER is refused,
     the server must complete it and the call must survive; (f) ~~whether
     CUCM's inbound INVITE carries SDP~~ — *answered 2026-10-17:* it does

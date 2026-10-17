@@ -31,6 +31,7 @@ import (
 	"github.com/emiago/diago/media/sdp"
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/pion/rtp"
 
 	"dialpark/server/internal/pbx"
 	"dialpark/server/internal/qos"
@@ -505,8 +506,12 @@ func mediaOptions(cfg Config) []diago.DiagoOption {
 		}),
 		diago.WithMediaConfig(diago.MediaConfig{
 			// The app leg's offer: Opus for app↔app, G.722 for wideband PBX
-			// calls, G.711 as the fallback everything speaks.
-			Codecs: []media.Codec{media.CodecAudioOpus, media.CodecAudioG722, media.CodecAudioUlaw, media.CodecAudioAlaw},
+			// calls, G.711 as the fallback everything speaks — and
+			// telephone-event (RFC 4733), so a digit pressed on either
+			// side travels as an event the relay forwards, not as a tone
+			// a codec mangles. Without it an exchange sees a device with
+			// no DTMF at all (CUCM lines bench 2026-10-17).
+			Codecs: []media.Codec{media.CodecAudioOpus, media.CodecAudioG722, media.CodecAudioUlaw, media.CodecAudioAlaw, media.CodecTelephoneEvent8000},
 		}),
 	}
 }
@@ -1161,10 +1166,53 @@ var DefaultTrunkCodecs = []media.Codec{media.CodecAudioG722, media.CodecAudioUla
 
 // trunkCodecs is the configured trunk offer, or the default.
 func (c Config) trunkCodecs() []media.Codec {
-	if len(c.TrunkCodecs) == 0 {
-		return DefaultTrunkCodecs
+	set := DefaultTrunkCodecs
+	if len(c.TrunkCodecs) > 0 {
+		set = c.TrunkCodecs
 	}
-	return c.TrunkCodecs
+	return withTelephoneEvent(set)
+}
+
+// withTelephoneEvent adds RFC 4733 telephone-event to a codec set that
+// lacks it. -trunk-codecs names audio codecs; DTMF is not a choice. An
+// INVITE to the PBX without it told CUCM the device had no DTMF (bench
+// 2026-10-17), and digits from the app would have been forwarded as audio
+// payload under the audio codec's payload type.
+func withTelephoneEvent(set []media.Codec) []media.Codec {
+	for _, c := range set {
+		if c.Name == "telephone-event" {
+			return set
+		}
+	}
+	out := make([]media.Codec, 0, len(set)+1)
+	out = append(out, set...)
+	return append(out, media.CodecTelephoneEvent8000)
+}
+
+// telephoneEventOffered reads the telephone-event format out of an SDP
+// offer, with the offerer's payload type: a dynamic type is theirs to
+// choose and the answer must echo it (CUCM and Asterisk use 101, which is
+// convention, not a rule).
+func telephoneEventOffered(body []byte) (media.Codec, bool) {
+	if len(body) == 0 {
+		return media.Codec{}, false
+	}
+	sd := sdp.SessionDescription{}
+	if err := sdp.Unmarshal(body, &sd); err != nil {
+		return media.Codec{}, false
+	}
+	md, err := sd.MediaDescription("audio")
+	if err != nil {
+		return media.Codec{}, false
+	}
+	codecs := make([]media.Codec, len(md.Formats))
+	n, _ := media.CodecsFromSDPRead(md.Formats, sd.Values("a"), codecs)
+	for _, c := range codecs[:n] {
+		if c.Name == "telephone-event" {
+			return c, true
+		}
+	}
+	return media.Codec{}, false
 }
 
 // ParseCodecs turns a flag value like "g722,pcmu,pcma" into codecs, in that
@@ -1649,7 +1697,13 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 	delayed := delayedOffer(in.InviteRequest)
 	answerCodecs := []media.Codec{negotiated}
 	if delayed {
+		// The PBX set already ends in telephone-event.
 		answerCodecs = lateOfferCodecs(negotiated, s.cfg.trunkCodecs())
+	} else if ev, ok := telephoneEventOffered(in.InviteRequest.Body()); ok {
+		// An early offer is answered with the callee's codec and, when the
+		// caller offered one, its telephone-event at the caller's payload
+		// type, so digits from this leg arrive as events.
+		answerCodecs = append(answerCodecs, ev)
 	}
 	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
 		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)}); err != nil {
@@ -1770,6 +1824,19 @@ type pump struct {
 	rr    *media.RTPPacketReader
 	rw    *media.RTPPacketWriter
 	codec media.Codec // destination: payload type and RTP clock
+	// RFC 4733 telephone-event (DTMF) on each leg, as negotiated: the
+	// payload type a digit arrives under from the source and the one the
+	// destination expects. A digit is an event packet, not audio: it is
+	// forwarded under the destination's event type and kept out of the
+	// audio timeline heuristics below (its packets repeat one timestamp
+	// for the length of the key press, which the frozen-clock detector
+	// would read as a stall). With no event type on the destination the
+	// digit is dropped rather than sent as audio under the audio type,
+	// which is what happened before 2026-10-17: a burst of noise.
+	srcEvent, dstEvent       uint8
+	hasSrcEvent, hasDstEvent bool
+	events                   atomic.Int64 // event packets forwarded
+	eventsDropped            atomic.Int64 // event packets with nowhere to go
 	// Guards the outbound timeline below. The relay goroutine had it to
 	// itself until hold music arrived (rule 8b): that plays from a ticker
 	// on another goroutine and must continue the same sequence numbers and
@@ -1855,9 +1922,29 @@ func newPump(from, to mediaEnd) (*pump, error) {
 	if okR && okW {
 		if ms := to.MediaSession(); ms != nil {
 			p.setPacketPath(rr, rw, media.CodecAudioFromSession(ms))
+			p.dstEvent, p.hasDstEvent = telephoneEventPT(ms)
 		}
+		p.srcEvent, p.hasSrcEvent = telephoneEventPT(from.MediaSession())
 	}
 	return p, nil
+}
+
+// telephoneEventPT is the payload type a leg negotiated for RFC 4733
+// telephone-event, if it negotiated one.
+func telephoneEventPT(ms *media.MediaSession) (uint8, bool) {
+	if ms == nil {
+		return 0, false
+	}
+	list := ms.CommonCodecs()
+	if len(list) == 0 {
+		list = ms.Codecs
+	}
+	for _, c := range list {
+		if c.Name == "telephone-event" {
+			return c.PayloadType, true
+		}
+	}
+	return 0, false
 }
 
 func (p *pump) setPacketPath(rr *media.RTPPacketReader, rw *media.RTPPacketWriter, dst media.Codec) {
@@ -1865,9 +1952,13 @@ func (p *pump) setPacketPath(rr *media.RTPPacketReader, rw *media.RTPPacketWrite
 }
 
 func (p *pump) String() string {
-	return fmt.Sprintf("read=%d written=%d write_errs=%d lost=%d reordered=%d jitter_ms=%.1f early_max_ms=%d late_max_ms=%d",
+	s := fmt.Sprintf("read=%d written=%d write_errs=%d lost=%d reordered=%d jitter_ms=%.1f early_max_ms=%d late_max_ms=%d",
 		p.read.Load(), p.written.Load(), p.writeErrs.Load(), p.lost.Load(), p.reordered.Load(), p.jitterMs(),
 		p.earlyMaxMs.Load(), p.lateMaxMs.Load())
+	if ev, dropped := p.events.Load(), p.eventsDropped.Load(); ev > 0 || dropped > 0 {
+		s += fmt.Sprintf(" events=%d events_dropped=%d", ev, dropped)
+	}
+	return s
 }
 
 func (p *pump) jitterMs() float64 { return float64(p.jitterMs100.Load()) / 100 }
@@ -1895,6 +1986,9 @@ func (p *pump) forward(payload []byte) error {
 	defer p.mu.Unlock()
 	hdr := p.rr.PacketHeader
 	now := time.Now()
+	if p.hasSrcEvent && hdr.PayloadType == p.srcEvent {
+		return p.forwardEvent(hdr, payload, now)
+	}
 	// A source we have already seen still needs rebasing if hold music has
 	// been on this stream since: `writeLocal` moved our sequence numbers
 	// and timestamps forward and the source knows nothing about it, so
@@ -1978,23 +2072,7 @@ func (p *pump) forward(payload []byte) error {
 		}
 	}
 	if newStream {
-		// Rebase this source's timeline onto ours, continuing right after
-		// what we last sent so the far end sees one monotonic stream.
-		// "What we last sent" is what matters, not whether THIS pump has
-		// seen a source: a pump that replaced another on the same leg
-		// (transfer) inherited its predecessor's numbering and must carry
-		// it on, or the far end sees the stream jump.
-		start := p.rw.InitTimestamp()
-		if p.wroteAny {
-			start = p.lastOut + p.codec.SampleTimestamp()
-		}
-		p.tsOffset = start - hdr.Timestamp
-		p.rebaseSeq(hdr.SequenceNumber)
-		p.srcSSRC, p.haveSrc, p.localWrote = hdr.SSRC, true, false
-		p.t0, p.ts0 = now, hdr.Timestamp
-		p.expectSeq = hdr.SequenceNumber + 1
-		p.lastArrival, p.lastTs = now, hdr.Timestamp
-		p.lag, p.frozen = 0, false
+		p.startStream(hdr, now)
 	} else {
 		// Arrival skew against the source's own timeline since its first
 		// packet: negative = early (a burst / backlog draining), positive =
@@ -2009,26 +2087,7 @@ func (p *pump) forward(payload []byte) error {
 		if skew > p.lateMaxMs.Load() {
 			p.lateMaxMs.Store(skew)
 		}
-		// Sequence accounting (wraparound-safe): a jump forward is loss, a
-		// small step back is a reordered packet that was counted lost a
-		// moment ago, a large one is the source renumbering its stream.
-		switch diff := int16(hdr.SequenceNumber - p.expectSeq); {
-		case diff == 0:
-			p.expectSeq++
-		case diff > 0:
-			p.lost.Add(int64(diff))
-			p.expectSeq = hdr.SequenceNumber + 1
-		case diff > -64:
-			p.reordered.Add(1)
-			if p.lost.Load() > 0 {
-				p.lost.Add(-1)
-			}
-		default:
-			// The source renumbered its stream (a phone restarting its
-			// sender): continue ours from where it was.
-			p.expectSeq = hdr.SequenceNumber + 1
-			p.rebaseSeq(hdr.SequenceNumber)
-		}
+		p.accountSeq(hdr.SequenceNumber)
 		// Interarrival jitter (RFC 3550 §6.4.1): the running mean of how far
 		// the arrival spacing strays from the timestamp spacing, in RTP ticks.
 		arrival := now.Sub(p.lastArrival).Seconds() * float64(p.codec.SampleRate)
@@ -2056,6 +2115,88 @@ func (p *pump) forward(payload []byte) error {
 		if !p.wroteAny || int16(seq-p.lastSeq) > 0 {
 			p.lastSeq = seq
 		}
+		p.lastOut, p.wroteAny = want, true
+	}
+	return err
+}
+
+// startStream rebases a source's timeline onto ours, continuing right after
+// what we last sent so the far end sees one monotonic stream. "What we last
+// sent" is what matters, not whether THIS pump has seen a source: a pump
+// that replaced another on the same leg (transfer) inherited its
+// predecessor's numbering and must carry it on, or the far end sees the
+// stream jump.
+func (p *pump) startStream(hdr rtp.Header, now time.Time) {
+	start := p.rw.InitTimestamp()
+	if p.wroteAny {
+		start = p.lastOut + p.codec.SampleTimestamp()
+	}
+	p.tsOffset = start - hdr.Timestamp
+	p.rebaseSeq(hdr.SequenceNumber)
+	p.srcSSRC, p.haveSrc, p.localWrote = hdr.SSRC, true, false
+	p.t0, p.ts0 = now, hdr.Timestamp
+	p.expectSeq = hdr.SequenceNumber + 1
+	p.lastArrival, p.lastTs = now, hdr.Timestamp
+	p.lag, p.frozen = 0, false
+}
+
+// accountSeq keeps the loss and reordering counters (wraparound-safe): a
+// jump forward is loss, a small step back is a reordered packet that was
+// counted lost a moment ago, a large one is the source renumbering its
+// stream.
+func (p *pump) accountSeq(seq uint16) {
+	switch diff := int16(seq - p.expectSeq); {
+	case diff == 0:
+		p.expectSeq++
+	case diff > 0:
+		p.lost.Add(int64(diff))
+		p.expectSeq = seq + 1
+	case diff > -64:
+		p.reordered.Add(1)
+		if p.lost.Load() > 0 {
+			p.lost.Add(-1)
+		}
+	default:
+		// The source renumbered its stream (a phone restarting its
+		// sender): continue ours from where it was.
+		p.expectSeq = seq + 1
+		p.rebaseSeq(seq)
+	}
+}
+
+// forwardEvent relays one RFC 4733 telephone-event packet — a DTMF digit,
+// or the end of one — under the destination's event payload type. It is in
+// the source's RTP sequence and timeline and is rebased exactly as audio
+// is, but it does not feed the audio clock heuristics: every packet of a
+// key press carries the timestamp the press started at, which is a
+// frozen clock to the detector in forward and must not be rebased away.
+// A digit with no event type on the far leg has nowhere to go and is
+// dropped; it is not sent as audio.
+func (p *pump) forwardEvent(hdr rtp.Header, payload []byte, now time.Time) error {
+	if !p.hasDstEvent {
+		p.eventsDropped.Add(1)
+		return nil
+	}
+	if !p.haveSrc || hdr.SSRC != p.srcSSRC || p.localWrote {
+		p.startStream(hdr, now)
+	} else {
+		p.accountSeq(hdr.SequenceNumber)
+	}
+	want := hdr.Timestamp + p.tsOffset
+	cur := p.rw.InitTimestamp()
+	if p.wroteAny {
+		cur = p.lastOut
+	}
+	p.rw.DelayTimestamp(want - cur)
+	seq := hdr.SequenceNumber + p.seqOffset
+	_, err := p.rw.WriteSamplesSeq(payload, 0, hdr.Marker, p.dstEvent, seq)
+	if err == nil {
+		p.events.Add(1)
+		if !p.wroteAny || int16(seq-p.lastSeq) > 0 {
+			p.lastSeq = seq
+		}
+		// The writer now stands at this timestamp; the next packet, audio
+		// or event, moves it from here.
 		p.lastOut, p.wroteAny = want, true
 	}
 	return err
