@@ -300,19 +300,24 @@ func (s *RTPSession) ReadRTP(b []byte, readPkt *rtp.Packet) (n int, err error) {
 		// We expect that SSRC only changed but MULTI RTP stream per one session is not supported
 		// NOTE: Reading codecs may be in a race while establishing session but it is expected
 		// that caller should not run reading while session is established
-		codec := sess.Codecs[0]
-		if codec.PayloadType != readPkt.PayloadType {
-			for _, c := range sess.Codecs {
+		// Dialler patch: the peer's payload type lives in the NEGOTIATED
+		// list (an answerer may number a dynamic codec its own way: CUCM's
+		// Opus at 114 against our 96), so look there first, then in ours;
+		// and a type in neither is still this stream — it is accounted
+		// under the session's audio codec and passed on, not dropped.
+		// Upstream searched only our own list and threw the packet away.
+		codec := CodecAudioFromSession(sess)
+	lookup:
+		for _, list := range [][]Codec{sess.filterCodecs, sess.Codecs} {
+			for _, c := range list {
 				if c.PayloadType == readPkt.PayloadType {
 					codec = c
-					break
+					break lookup
 				}
 			}
-
-			if codec.PayloadType != readPkt.PayloadType {
-				DefaultLogger().Warn("Received RTP with unsupported payload_type", "pt", readPkt.PayloadType)
-				return 0, nil
-			}
+		}
+		if codec.PayloadType != readPkt.PayloadType {
+			DefaultLogger().Debug("Received RTP with a payload type outside the negotiated list; passing it on", "pt", readPkt.PayloadType)
 		}
 
 		*stats = RTPReadStats{
@@ -407,18 +412,24 @@ func (s *RTPSession) WriteRTP(pkt *rtp.Packet) error {
 	writeStats := &s.writeStats
 	// For now we only track latest SSRC
 	if writeStats.SSRC != pkt.SSRC {
-		codec, err := func() (Codec, error) {
-			// Find codec from promoted list of codecs
-			for _, c := range sess.Codecs {
-				if c.PayloadType == pkt.PayloadType {
-					return c, nil
+		// The clock for this stream's sender reports. Dialler patch: look
+		// in the NEGOTIATED list first — that is where a peer's own payload
+		// type lives (CUCM answers an Opus offered at 96 with 114) — then
+		// in ours, and if the type is in neither, take the session's audio
+		// codec rather than fail: the packet has already gone out above,
+		// and upstream returned an error here that the relay read as a
+		// failed write and stopped the stream on (lines bench 2026-10-17
+		// 10:32, "unknown media codec used for payload type=114").
+		codec := func() Codec {
+			for _, list := range [][]Codec{sess.filterCodecs, sess.Codecs} {
+				for _, c := range list {
+					if c.PayloadType == pkt.PayloadType {
+						return c
+					}
 				}
 			}
-			return Codec{}, fmt.Errorf("unknown media codec used for payload type=%d", pkt.PayloadType)
+			return CodecAudioFromSession(sess)
 		}()
-		if err != nil {
-			return err
-		}
 
 		*writeStats = RTPWriteStats{
 			SSRC:       pkt.SSRC,

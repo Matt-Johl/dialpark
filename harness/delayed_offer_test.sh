@@ -26,13 +26,21 @@
 # the server log shows the call bridged on the expected codec with no
 # error. Exit 0 = pass. Publishes no host ports.
 #
+# OPUS=1 runs one call instead, with the server offering Opus first and the
+# PBX answering Opus at ITS payload type, 114 rather than our 96 — CUCM's
+# habit (bench 2026-10-17 13:24): the relay must send the PBX Opus marked
+# 114 or the PBX drops it all and the app-to-PBX direction is silent.
+#
 #   make harness-delayed-offer
+#   make harness-delayed-offer-opus
 #   KEEP=1 make harness-delayed-offer
 set -eu
 cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f harness/docker-compose.yml -f harness/docker-compose.noports.yml --profile test"
 export DIALPARK_PUBLIC_HOST=dialpark
+OPUS="${OPUS:-0}"
+[ "$OPUS" = 1 ] && export DIALPARK_TRUNK_CODECS=opus,g722,pcmu,pcma
 NET=dialpark-harness_default
 MEDIA_DIR=harness/baresip/media
 CALL_SECONDS="${CALL_SECONDS:-8}"
@@ -64,7 +72,9 @@ call() {
   echo "== call: the PBX (SIPp) INVITEs 211 with no SDP, answers $codec in the ACK, echoes the media, hangs up after ${CALL_SECONDS}s"
   MARK="$(logs | wc -l | tr -d ' ')"
   set +e
-  $COMPOSE run --rm --entrypoint sipp sipp dialpark:5060 -t u1 -sf /scenarios/delayed_offer_invite.xml \
+  scenario=delayed_offer_invite.xml
+  [ "$codec" = opus ] && scenario=delayed_offer_invite_opus.xml
+  $COMPOSE run --rm --entrypoint sipp sipp dialpark:5060 -t u1 -sf "/scenarios/$scenario" \
     -s 211 -m 1 -nostdin -timeout 45s -timeout_error -d "$((CALL_SECONDS * 1000))" -rtp_echo -key pt "$pt" -key codec "$codec" \
     -trace_err -error_file /tmp/delayed_offer.err > "$MEDIA_DIR/sipp-delayed-offer.out" 2>&1
   rc=$?
@@ -72,7 +82,7 @@ call() {
   sleep 2
   ok=1
   if [ "$rc" -eq 0 ]; then
-    echo "   SIPp: the 200 OK offered G.722 first; the ACK's $codec answer was taken; BYE answered"
+    echo "   SIPp: the 200 OK led with the app's codec; the ACK's $codec answer was taken; BYE answered"
   else
     echo "   FAIL: SIPp exit $rc — the 200 OK was late, had no SDP, or did not lead with the app's codec"
     tail -n 12 "$MEDIA_DIR/sipp-delayed-offer.out" | sed 's/^/   sipp: /'
@@ -139,8 +149,12 @@ PY
   [ "$ok" = 1 ] && echo "PASS $codec" || { echo "FAIL $codec"; fail=1; }
 }
 
-call 9 G722
-call 0 PCMU
+if [ "$OPUS" = 1 ]; then
+  call 114 opus
+else
+  call 9 G722
+  call 0 PCMU
+fi
 
 if [ "$fail" = 0 ]; then
   echo "PASS: a delayed-offer INVITE from the PBX carries audio whether the PBX takes the app's codec or another"

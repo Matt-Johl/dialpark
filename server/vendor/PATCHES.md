@@ -111,6 +111,25 @@ upstream release named in `modules.txt`; re-apply when bumping.
   offers the callee's codec first and the rest of the PBX set behind it,
   and re-INVITEs the callee when the exchange picks one of the others.
 
+- `media/media_session.go` (`updateRemoteCodecs`, `sameCodecKind`) — codec
+  identity for negotiation is name, clock rate and channels, not the
+  payload type, and the negotiated list carries the REMOTE's codec with
+  the number it chose. Upstream compared whole structs: CUCM answers an
+  Opus offered at 96 with Opus at 114, which matched nothing, so the
+  session fell back to its own first codec and the relay sent the phone
+  Opus marked 96 — silence from the app to the phone while the phone's
+  own 114 was rewritten to 96 for the app and worked (lines bench
+  2026-10-17 13:24).
+- `media/rtp_session.go` (`WriteRTP`) — the sender-report clock is looked
+  up in the negotiated codec list first, then ours, and falls back to the
+  session's audio codec instead of returning an error for a payload type
+  it does not know. The packet had already been written when upstream
+  returned that error, and the relay read it as a failed write and
+  stopped the stream — the other half of the 114 case above. `ReadRTP`
+  likewise: a received payload type is looked up in the negotiated list
+  first, and one in neither list is accounted under the session's audio
+  codec and passed on; upstream dropped every such packet with a warning.
+
 ## github.com/emiago/sipgo
 
 - `dialog_client.go` (`inviteCancel`) — cancelling an INVITE watches the
