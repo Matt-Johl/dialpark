@@ -99,6 +99,17 @@ upstream release named in `modules.txt`; re-apply when bumping.
   answered 202 and nothing else happened, so a blind transfer silently did
   nothing. The B2BUA routes the target itself and only reads the Refer-To
   off this dialog, but it has to be reached to do so.
+- `dialog_server_session.go` (`AnswerOptions`, `answerLateSession`,
+  `AnswerLate`, `ReadAck`) — delayed offer (RFC 3261 §13.2.1): an INVITE
+  with no body is answered with our offer in the 200 OK and the answer is
+  taken from the ACK. Upstream's `AnswerOptions` refused it ("no sdp
+  present in INVITE"); its `AnswerLate` carried none of the options
+  (codecs, RTPNAT, the REFER and media callbacks) and never checked that
+  an answer arrived; and `ReadAck` swallowed a `Finalize` error, leaving a
+  confirmed dialog with no media. CUCM sends a delayed offer to every
+  third-party SIP line (SPEC §6 item 3c, bench 2026-10-17); the B2BUA's
+  one addition is to refuse a late-offer call whose ACK answered with a
+  codec the callee does not have.
 
 ## github.com/emiago/sipgo
 

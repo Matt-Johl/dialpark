@@ -138,6 +138,14 @@ harness-pbx-unavailable:
 harness-cancel-before-answer:
 	sh harness/cancel_before_answer_test.sh
 
+# A delayed-offer INVITE from the PBX (SPEC §6 item 3c): no SDP in the
+# INVITE, our 200 OK makes the offer, the ACK answers it. CUCM sends these
+# to every third-party SIP line and Asterisk never does, so SIPp plays the
+# PBX at the trunk listener and echoes the media back to the app. Publishes
+# no host ports.
+harness-delayed-offer:
+	sh harness/delayed_offer_test.sh
+
 # A trunk TCP/TLS connection gone silently dead (a network blip on either
 # side): the per-call watchdog must drop it and redial within seconds, not
 # sit on it until Timer B, and the OPTIONS qualify must drop it before any
@@ -198,7 +206,8 @@ harness-regression:
 	for t in harness-call harness-wake harness-qos \
 	         harness-trunk harness-trunk-srtp harness-trunk-tls harness-trunk-secure \
 	         harness-trunk-stall harness-pbx-hold harness-pbx-unavailable \
-	         harness-hold-music harness-cancel-before-answer harness-admin harness-admin-ui harness-licence; do \
+	         harness-hold-music harness-cancel-before-answer harness-delayed-offer \
+	         harness-admin harness-admin-ui harness-licence; do \
 	  echo "=== $$t"; $(MAKE) $$t || { echo "REGRESSION FAILED: $$t"; exit 1; }; \
 	done; \
 	echo "=== NARROWBAND=1 harness-trunk"; NARROWBAND=1 sh harness/trunk_test.sh || exit 1; \

@@ -11,7 +11,7 @@ FROM alpine:3.20
 RUN apk add --no-cache asterisk asterisk-srtp asterisk-sample-config asterisk-sounds-en
 COPY pjsip.conf extensions.conf /etc/asterisk/
 COPY pjsip-tls.conf /etc/asterisk/pjsip-tls.conf
-COPY pjsip-lines.conf extensions-lines.conf /etc/asterisk/
+COPY pjsip-lines.conf extensions-lines.conf voicemail.conf /etc/asterisk/
 # ASTERISK_LINES=yes makes this a PBX that expects the light server to
 # REGISTER one third-party SIP line per device rather than to trunk to it
 # (SPEC §6 item 3c), for `make harness-pbx-lines`. The two configurations

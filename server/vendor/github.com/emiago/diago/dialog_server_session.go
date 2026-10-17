@@ -32,6 +32,12 @@ type DialogServerSession struct {
 
 	mediaConf MediaConfig
 	closed    atomic.Uint32
+
+	// Late offer (Dialler patch): set by ReadAck under DialogMedia.mu when
+	// the ACK to our 200 OK carried the SDP answer, or when applying it
+	// failed. answerLateSession reads both once RespondSDP returns.
+	lateAnswered  bool
+	lateAnswerErr error
 }
 
 func (d *DialogServerSession) Id() string {
@@ -191,6 +197,14 @@ func (d *DialogServerSession) AnswerOptions(opt AnswerOptions) error {
 		return err
 	}
 	rtpSess := media.NewRTPSession(d.mediaSession)
+	// Dialler patch: an INVITE with no SDP is a delayed offer (RFC 3261
+	// §13.2.1) — our 200 OK makes the offer and the ACK brings the answer.
+	// Upstream refused these ("no sdp present in INVITE"). CUCM sends them
+	// to every third-party SIP line, so an answer path that only works
+	// with an early offer cannot take a call from one.
+	if len(d.InviteRequest.Body()) == 0 {
+		return d.answerLateSession(rtpSess)
+	}
 	return d.answerSession(rtpSess)
 }
 
@@ -266,22 +280,45 @@ func (d *DialogServerSession) AnswerLate() error {
 	if err := d.initMediaSessionFromConf(d.mediaConf); err != nil {
 		return err
 	}
-	sess := d.mediaSession
-	rtpSess := media.NewRTPSession(sess)
+	rtpSess := media.NewRTPSession(d.mediaSession)
+	return d.answerLateSession(rtpSess)
+}
+
+// answerLateSession answers an INVITE that carried no SDP: the 200 OK
+// carries our offer and the ACK the peer's answer, which ReadAck applies
+// to the session before the dialog is confirmed. RespondSDP blocks until
+// that ACK (or 64*T1), so on return the answer has either been applied or
+// has not come — and a 200 OK whose ACK brought no SDP is a call with no
+// media, which is an error here rather than a silent one-way leg.
+//
+// Dialler patch: upstream's AnswerLate neither checked for the answer nor
+// surfaced a failure to apply it.
+func (d *DialogServerSession) answerLateSession(rtpSess *media.RTPSession) error {
+	sess := rtpSess.Sess
 	localSDP := sess.LocalSDP()
 
 	d.mu.Lock()
 	d.initRTPSessionUnsafe(sess, rtpSess)
-	// Close RTP session
-	// d.onCloseUnsafe(func() error {
-	// 	return rtpSess.Close()
-	// })
+	d.lateAnswered, d.lateAnswerErr = false, nil
 	d.mu.Unlock()
 
-	// This will now block until ACK received with 64*T1 as max.
-	// How to let caller to cancel this?
 	if err := d.RespondSDP(localSDP); err != nil {
 		return err
+	}
+
+	d.mu.Lock()
+	answered, err := d.lateAnswered, d.lateAnswerErr
+	d.mu.Unlock()
+	if err != nil {
+		// ReadAck has already hung up.
+		return fmt.Errorf("late offer: applying the ACK's SDP: %w", err)
+	}
+	if !answered {
+		// The dialog is confirmed — the ACK arrived — so unlike every
+		// other answer failure this one has to be ended with a BYE, or the
+		// caller sits on a call that carries nothing.
+		e := d.Hangup(d.Context())
+		return errors.Join(fmt.Errorf("late offer: the ACK carried no SDP answer"), e)
 	}
 	// Must be called after media and reader writer is setup
 	return rtpSess.MonitorBackground()
@@ -304,13 +341,18 @@ func (d *DialogServerSession) ReadAck(req *sip.Request, tx sip.ServerTransaction
 		if body != nil && contentType.Value() == "application/sdp" {
 			// This is Late offer response
 			if err := sess.RemoteSDP(body); err != nil {
+				d.lateAnswerErr = err
 				return err
 			}
 
-			// Finalize session
+			// Finalize session. Dialler patch: upstream returned nil here,
+			// which turned a session that could not be set up (an SRTP
+			// context, say) into a confirmed dialog with no media.
 			if err := sess.Finalize(); err != nil {
-				return nil
+				d.lateAnswerErr = err
+				return err
 			}
+			d.lateAnswered = true
 		}
 		return nil
 	}()
