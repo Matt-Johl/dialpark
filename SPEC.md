@@ -832,7 +832,7 @@ on by config — see §7.4.
      that does not exist the moment iOS suspends the app — exactly the
      problem this product exists to solve — and it would put a PBX
      credential inside a public App Store binary. From the exchange's
-     point of view this server is therefore a fleet of third-party SIP
+     point of view this server is therefore a set of third-party SIP
      devices, one registration per device, **held around the clock**
      whether the phone is awake, asleep or in a drawer. The INVITE always
      lands somewhere alive and the wake path is unchanged. **The app leg
@@ -860,7 +860,7 @@ on by config — see §7.4.
      after a 401/403 retry**, so a wrong password logs once instead of
      hammering the exchange, and start-up is jittered so fifty lines do
      not stampede one node. The refresh deadline is a time of day, watched
-     by one 10 s sweep for the fleet, because the timer it sleeps on counts
+     by one 10 s sweep for all lines, because the timer it sleeps on counts
      only time the machine is awake while the exchange's lease counts the
      clock: an 18-minute clamshell sleep on the dev Mac left line 201 with
      no contact on the PBX for three minutes and two calls refused there
@@ -933,7 +933,12 @@ on by config — see §7.4.
      without disturbing another's call. `make harness-pbx-lines`.
      What it cannot prove, and what therefore stays open until a CUCM
      exists: that CUCM matches a registration to a third-party device by
-     digest user and DN; its realm and challenge shape; ~~line-side early
+     digest user and DN; ~~its realm and challenge shape~~ (*answered
+     2026-10-17:* realm `ccmsipline`, MD5, no qop — and one nonce handed
+     to every line that registers in the same instant, so the second to
+     answer it is re-challenged with a new nonce and no `stale=true`;
+     the REGISTER client answers a new nonce and calls only a repeated
+     one a refusal, `sipreg_challenge_test.go`); ~~line-side early
      offer~~ (*answered 2026-10-17:* CUCM sends a line a **delayed** offer,
      no SDP at all, which the server now answers — the "Much later"
      delayed-offer entry, done — and it also sends each line an
