@@ -1891,10 +1891,19 @@ old phase labels still resolve. None of this is on the roadmap.
   have to make an offer before knowing what the callee takes — the
   tandem-coding problem the copy-relay exists to avoid. That was the wrong
   order of events. The callee is dialled first and answers with its codec,
-  and only then is the caller answered: so the late offer carries exactly
-  the one codec the callee took, the relay never transcodes, and no
-  re-INVITE is needed. With no caller SDP to narrow from, the callee is
-  offered the PBX codec set (`-trunk-codecs`). What made it stop being
+  and only then is the caller answered: so the late offer leads with the
+  codec the callee took, and the relay never transcodes. It is **not** that
+  one codec alone — the first cut was, and CUCM answered a G.722-only
+  offer with an ACK carrying no SDP and a BYE a few milliseconds later
+  (10:53 the same day), while taking PCMU from a G.722-first list. So the
+  200 OK offers the callee's codec first and the rest of `-trunk-codecs`
+  behind it, and when the exchange picks one of the others the callee is
+  moved onto it by re-INVITE before the bridge starts — the same move a
+  transfer makes (`renegotiateCodec`), one extra round trip on the app
+  leg and only when the exchange disagrees. A deployment whose cluster
+  always picks G.711 avoids even that by ordering `-trunk-codecs`
+  `pcmu,pcma,g722`. With no caller SDP to narrow from, the callee is
+  offered the PBX codec set. What made it stop being
   optional: CUCM sends a delayed offer to every third-party SIP line (item
   3c), and a line has no Early Offer tick box — on the 2026-10-17 CUCM
   bench every inbound call rang the app and died the moment it was
@@ -1904,12 +1913,10 @@ old phase labels still resolve. None of this is on the roadmap.
   same "INVITE has no body" test chooses between them in both places.
   Proof: `make harness-delayed-offer` (SIPp plays the PBX, as Asterisk
   never sends one) and the in-process tests in `b2bua/delayed_offer_test.go`,
-  which drive a real B2BUA on loopback through both paths. One consequence
-  to state: with an early offer the caller's codec is the callee's by
-  construction; with a late one the exchange answers *our* single-codec
-  offer, and a region rule that excludes it (G.722 offered to a G.711-only
-  region) makes the server end the call naming both codecs rather than
-  bridge silence. That is a CUCM region setting, not a server option.
+  which drive a real B2BUA on loopback through both paths; the gate runs
+  the call twice, the PBX answering G.722 and then PCMU, and asserts the
+  re-INVITE in the second. A callee that will not move (its re-INVITE
+  refused) ends the call with both codecs named rather than bridge silence.
 - **Message-waiting indicator in the app.** CUCM tells every registered
   line about its mailbox with an unsolicited message-summary NOTIFY (RFC
   3842) on each REGISTER and on each change; Asterisk does the same once

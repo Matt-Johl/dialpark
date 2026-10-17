@@ -1193,6 +1193,18 @@ func ParseCodecs(list string) ([]media.Codec, error) {
 	return out, nil
 }
 
+// lateOfferCodecs is what a delayed-offer caller is offered in our 200 OK:
+// the callee's codec first, then the rest of the PBX set as fallbacks.
+func lateOfferCodecs(first media.Codec, set []media.Codec) []media.Codec {
+	out := []media.Codec{first}
+	for _, c := range set {
+		if !sameCodec(c, first) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // callTouchesTrunk reports whether either leg is the PBX trunk. When it is,
 // the callee is offered G.711 only so the negotiated codec is one both legs
 // share (the relay does not transcode); app↔app keeps the full set.
@@ -1623,29 +1635,28 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		return err
 	}
 	legA.codec, legB.codec = negotiated, negotiated
-	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: []media.Codec{negotiated},
+	// With an early offer the caller is answered with the callee's codec
+	// alone: it is one the caller offered, so it cannot refuse. With a
+	// delayed offer the caller answers OUR offer in its ACK, and an offer
+	// of that one codec is too narrow for an exchange: CUCM, asked for
+	// G.722 alone, answered with an ACK carrying no SDP and a BYE a few
+	// milliseconds later (lines bench 2026-10-17 10:53), while the same
+	// cluster takes PCMU from a G.722-first list. So the late offer is the
+	// whole PBX set with the callee's codec first; if the exchange picks
+	// another, the callee is moved onto it by re-INVITE below — the same
+	// move a transfer makes (renegotiateCodec) — so the relay still never
+	// transcodes.
+	delayed := delayedOffer(in.InviteRequest)
+	answerCodecs := []media.Codec{negotiated}
+	if delayed {
+		answerCodecs = lateOfferCodecs(negotiated, s.cfg.trunkCodecs())
+	}
+	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
 		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)}); err != nil {
 		log.Error("answer caller", "err", err)
 		_ = out.Hangup(out.Context())
 		out.Close()
 		return err
-	}
-	// With an early offer the caller's codec is the callee's by
-	// construction: the callee was offered a subset of the caller's SDP.
-	// With a delayed offer the caller answers OUR offer in its ACK, and an
-	// exchange whose region rules exclude the one codec we offered can
-	// answer with something else (or nothing usable). The relay copies
-	// payload without transcoding, so that is a call with no audio in
-	// either direction — fail it here, naming both codecs, rather than
-	// bridge it. (SPEC §6 item 3c: a mismatch is a CUCM region setting.)
-	if delayedOffer(in.InviteRequest) {
-		if got := media.CodecAudioFromSession(in.Media().MediaSession()); got != negotiated {
-			log.Error("late offer: the caller answered with a codec the callee does not have; no audio is possible",
-				"offered", negotiated.Name, "answered", got.Name)
-			out.Close()
-			_ = in.Hangup(in.Context())
-			return fmt.Errorf("late offer answered with %s, callee has %s", got.Name, negotiated.Name)
-		}
 	}
 	// Same rule the other way round, and only now: a leg's session is not
 	// secure until BOTH crypto contexts exist, and ours is created when we
@@ -1664,7 +1675,23 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		return err
 	}
 	defer out.Close()
-	log.Info("bridged", "dst", dst.String(), "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
+	// The late offer's answer: if the exchange took a codec other than the
+	// callee's, move the callee onto it now that its dialog is confirmed.
+	// A callee that will not move leaves two legs on different codecs,
+	// which the copy-relay cannot bridge, so that ends the call.
+	if delayed {
+		if got := media.CodecAudioFromSession(in.Media().MediaSession()); !sameCodec(got, negotiated) {
+			log.Info("late offer: the caller took another codec; moving the callee to it", "callee_had", negotiated.Name, "caller_took", got.Name)
+			if err := renegotiateCodec(ctx, legB, got); err != nil {
+				log.Error("late offer: the callee would not move to the caller's codec; no audio is possible", "codec", got.Name, "err", err)
+				_ = out.Hangup(out.Context())
+				_ = in.Hangup(in.Context())
+				return fmt.Errorf("late offer answered with %s and the callee would not move: %w", got.Name, err)
+			}
+			legA.codec, legB.codec = got, got
+		}
+	}
+	log.Info("bridged", "dst", dst.String(), "codec", legA.codec.Name, "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
 
 	// Media relay: our own pumps rather than diago's Bridge, so every leg
 	// reports what it read and wrote — a phone that receives nothing while

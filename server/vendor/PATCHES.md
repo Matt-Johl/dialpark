@@ -107,9 +107,9 @@ upstream release named in `modules.txt`; re-apply when bumping.
   (codecs, RTPNAT, the REFER and media callbacks) and never checked that
   an answer arrived; and `ReadAck` swallowed a `Finalize` error, leaving a
   confirmed dialog with no media. CUCM sends a delayed offer to every
-  third-party SIP line (SPEC §6 item 3c, bench 2026-10-17); the B2BUA's
-  one addition is to refuse a late-offer call whose ACK answered with a
-  codec the callee does not have.
+  third-party SIP line (SPEC §6 item 3c, bench 2026-10-17). The B2BUA
+  offers the callee's codec first and the rest of the PBX set behind it,
+  and re-INVITEs the callee when the exchange picks one of the others.
 
 ## github.com/emiago/sipgo
 

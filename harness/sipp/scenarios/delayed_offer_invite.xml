@@ -5,11 +5,17 @@
   §6 item 3c). SIPp stands in for CUCM at the server's trunk listener: its
   INVITE to app 211 carries no SDP, as CUCM's to a third-party SIP line
   does (bench 2026-10-17). The server must ring the app, and once the app
-  answers, put ITS offer in the 200 OK — exactly one audio codec, the one
-  the app took (G.722 here) — and take the answer from this ACK. Run with
-  -rtp_echo so whatever the app sends comes straight back to it: the app's
-  recording of its own tone is the proof the media path was built from the
-  ACK's SDP.
+  answers, put ITS offer in the 200 OK — the codec the app took (G.722
+  here) first, then the rest of the PBX set as fallbacks — and take the
+  answer from this ACK. Run with -rtp_echo so whatever the app sends comes
+  straight back to it: the app's recording of its own tone is the proof the
+  media path was built from the ACK's SDP.
+
+  The ACK answers with -key pt / -key codec (9 G722, the app's own codec;
+  0 PCMU, which makes the server move the app onto PCMU by
+  re-INVITE before bridging — what CUCM did on 2026-10-17 10:53, when a
+  G.722-only offer got an ACK with no SDP and a BYE, while the same cluster
+  takes PCMU from a list).
 -->
 <scenario name="delayed_offer_invite">
   <send retrans="500">
@@ -30,13 +36,14 @@
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
   <recv response="183" optional="true"/>
-  <!-- The 200 OK is the offer: one audio codec, G.722 (PT 9), with or
-       without a telephone-event line after it. A 200 with no SDP, or one
-       offering the whole set, fails the scenario here. -->
+  <!-- The 200 OK is the offer: G.722 (PT 9), the app's codec, FIRST, then
+       whatever else the PBX set holds. A 200 with no SDP, or one that does
+       not lead with the app's codec, fails the scenario here. -->
   <recv response="200" rtd="1" rrs="true" timeout="30000">
     <action>
-      <ereg regexp="m=audio [0-9]+ RTP/AVP 9( 101)?[\r\n]" search_in="body" check_it="true" assign_to="offer"/>
+      <ereg regexp="m=audio [0-9]+ RTP/AVP 9( [0-9]+)*[\r\n]" search_in="body" check_it="true" assign_to="offer"/>
       <ereg regexp="a=rtpmap:9 G722/8000" search_in="body" check_it="true" assign_to="g722"/>
+      <ereg regexp="a=rtpmap:0 PCMU/8000" search_in="body" check_it="true" assign_to="pcmu"/>
     </action>
   </recv>
   <send>
@@ -57,8 +64,8 @@
       s=-
       c=IN IP[media_ip_type] [media_ip]
       t=0 0
-      m=audio [media_port] RTP/AVP 9 101
-      a=rtpmap:9 G722/8000
+      m=audio [media_port] RTP/AVP [pt] 101
+      a=rtpmap:[pt] [codec]/8000
       a=rtpmap:101 telephone-event/8000
       a=fmtp:101 0-16
       a=sendrecv
@@ -82,5 +89,5 @@
   </send>
   <recv response="200" timeout="5000"/>
   <!-- Unused references keep SIPp quiet about assigned-but-unread variables. -->
-  <Reference variables="offer,g722"/>
+  <Reference variables="offer,g722,pcmu"/>
 </scenario>

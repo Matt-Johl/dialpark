@@ -162,8 +162,10 @@ checklist is §7.3 item 10.
 
 Two things a CUCM does to a registered line that Asterisk does not, both
 handled since 2026-10-17: its INVITE carries no SDP (a *delayed offer* —
-the server's 200 OK offers the one codec the app took and the ACK answers
-it; `make harness-delayed-offer`, with SIPp as the PBX), and it sends the
+the server's 200 OK offers the app's codec first and the rest of
+`-trunk-codecs` behind it, the ACK answers, and if the exchange picked
+another codec the app is moved onto it by re-INVITE before the bridge;
+`make harness-delayed-offer`, with SIPp as the PBX), and it sends the
 line an unsolicited message-waiting NOTIFY on every registration, which is
 answered 200 and logged (`pbx: message waiting`; the lines bench asserts
 it). Nothing shows the mailbox state on the phone yet.
