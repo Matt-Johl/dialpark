@@ -1,6 +1,8 @@
 package b2bua
 
 import (
+	"errors"
+	"github.com/emiago/sipgo"
 	"testing"
 
 	"github.com/emiago/sipgo/sip"
@@ -153,5 +155,27 @@ func TestUriUser(t *testing.T) {
 		if got := uriUser(tc.in); got != tc.want {
 			t.Errorf("uriUser(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// CUCM's way of saying the calling line is not registered: 503 with Warning
+// 399 "Unable to find a device handler …" (bench 2026-10-22 09:33). Any
+// other failure is the call's own business.
+func TestExchangeSaysUnregistered(t *testing.T) {
+	res := func(code int, warning string) error {
+		r := sip.NewResponse(code, "x")
+		if warning != "" {
+			r.AppendHeader(sip.NewHeader("Warning", warning))
+		}
+		return sipgo.ErrDialogResponse{Res: r}
+	}
+	if !exchangeSaysUnregistered(res(503, `399 13756-cucm001 "Unable to find a device handler for the request received on port 5062 from 10.7.141.25"`)) {
+		t.Error("CUCM's device-handler 503 must read as unregistered")
+	}
+	if exchangeSaysUnregistered(res(503, "")) {
+		t.Error("a bare 503 is not a verdict on the line")
+	}
+	if exchangeSaysUnregistered(res(486, "")) || exchangeSaysUnregistered(errors.New("timeout")) {
+		t.Error("busy and a timeout are not verdicts on the line")
 	}
 }

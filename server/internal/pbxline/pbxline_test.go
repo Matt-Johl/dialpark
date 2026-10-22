@@ -573,3 +573,141 @@ func TestBackoff(t *testing.T) {
 		}
 	}
 }
+
+// The link to the exchange goes down and comes back (CUCM bench
+// 2026-10-22 09:11–09:35): the retry interval must stay short, and a line
+// that is retrying must try again the moment the exchange is heard from,
+// not at the end of its backoff.
+
+func TestTheRetryCapIsThirtySeconds(t *testing.T) {
+	var c Config
+	c.applyDefaults()
+	if c.BackoffCap != 30*time.Second {
+		t.Fatalf("BackoffCap = %v, want 30s", c.BackoffCap)
+	}
+	if c.BackoffBase != 5*time.Second || c.RegistrarDebounce != 5*time.Second {
+		t.Fatalf("base %v debounce %v, want 5s and 5s", c.BackoffBase, c.RegistrarDebounce)
+	}
+}
+
+// failUntil answers every REGISTER with a timeout until the test says the
+// link is back.
+type failUntil struct {
+	*fakeRegistrar
+	mu   sync.Mutex
+	down bool
+}
+
+func newFailUntil() *failUntil {
+	f := &failUntil{down: true}
+	f.fakeRegistrar = newFakeRegistrar(func(n int, l Line) (Registration, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.down {
+			return Registration{}, errors.New("register: Timer_B timed out. transaction timeout")
+		}
+		return Registration{Expiry: 40 * time.Millisecond}, nil
+	})
+	return f
+}
+
+func (f *failUntil) up() { f.mu.Lock(); f.down = false; f.mu.Unlock() }
+
+func slowRetryManager(t *testing.T, r Registrar) *Manager {
+	t.Helper()
+	return New(Config{
+		Registrar:         r,
+		Expiry:            time.Hour,
+		MinRefresh:        time.Millisecond,
+		BackoffBase:       time.Second, // far longer than the test waits
+		BackoffCap:        time.Second,
+		RegistrarDebounce: -1, // off: every signal counts
+		StartSpread:       0,
+		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Rand:              func() float64 { return 0 },
+	})
+}
+
+func TestARetryingLineRegistersAtOnceWhenTheRegistrarIsSeen(t *testing.T) {
+	r := newFailUntil()
+	m := slowRetryManager(t, r)
+	m.Put(Line{User: "211", DN: "211", DigestUser: "line211", Secret: "s"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop()
+	waitFor(t, "the first attempt to fail", func() bool { return stateOf(t, m, "211") == StateRetrying })
+	n := r.count()
+	// The link is back and the exchange has been heard from: the next
+	// attempt must come now, not a second later.
+	r.up()
+	m.RegistrarSeen()
+	waitFor(t, "an attempt prompted by the exchange", func() bool { return r.count() > n })
+	waitFor(t, "the line to register", func() bool { return stateOf(t, m, "211") == StateRegistered })
+}
+
+func TestTheExchangeDisowningALineReRegistersIt(t *testing.T) {
+	r := newFakeRegistrar(nil)
+	m := New(Config{
+		Registrar: r, Expiry: time.Hour, MinRefresh: time.Millisecond, StartSpread: 0,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Rand: func() float64 { return 0 },
+	})
+	m.Put(Line{User: "211", DN: "211", DigestUser: "line211", Secret: "s"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop()
+	waitFor(t, "the line to register", func() bool { return stateOf(t, m, "211") == StateRegistered })
+	n := r.count()
+	// Registered as far as we know, for an hour; the exchange says
+	// otherwise — a REGISTER goes now.
+	m.Unregistered("211")
+	waitFor(t, "a REGISTER prompted by the exchange's verdict", func() bool { return r.count() > n })
+	m.Unregistered("nobody") // unknown user: nothing happens, nothing breaks
+}
+
+func TestARefusedLineIgnoresTheExchange(t *testing.T) {
+	r := newFakeRegistrar(func(n int, l Line) (Registration, error) {
+		return Registration{}, &Refused{Status: 401, Reason: "credential refused"}
+	})
+	m := testManager(t, r)
+	m.Put(Line{User: "211", DN: "211", DigestUser: "line211", Secret: "wrong"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop()
+	waitFor(t, "the line to latch refused", func() bool { return stateOf(t, m, "211") == StateRefused })
+	n := r.count()
+	m.RegistrarSeen()
+	m.Unregistered("211")
+	time.Sleep(20 * time.Millisecond)
+	if r.count() != n {
+		t.Fatalf("a refused line retried (%d → %d); a wrong password must wait for a new one", n, r.count())
+	}
+	var nilManager *Manager
+	nilManager.RegistrarSeen() // trunk mode: no manager, no panic
+	nilManager.Unregistered("211")
+}
+
+func TestRegistrarSeenIsDebounced(t *testing.T) {
+	r := newFailUntil()
+	m := New(Config{
+		Registrar: r, Expiry: time.Hour, MinRefresh: time.Millisecond,
+		BackoffBase: time.Second, BackoffCap: time.Second, RegistrarDebounce: time.Hour, StartSpread: 0,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Rand: func() float64 { return 0 },
+	})
+	m.Put(Line{User: "211", DN: "211", DigestUser: "line211", Secret: "s"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop()
+	waitFor(t, "the first attempt to fail", func() bool { return stateOf(t, m, "211") == StateRetrying })
+	n := r.count()
+	for i := 0; i < 50; i++ {
+		m.RegistrarSeen() // a burst of OPTIONS polls, say
+	}
+	time.Sleep(20 * time.Millisecond)
+	if r.count() != n {
+		t.Fatalf("an attempt was made within the debounce window (%d → %d)", n, r.count())
+	}
+}

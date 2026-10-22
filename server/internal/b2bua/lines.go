@@ -2,6 +2,7 @@ package b2bua
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/emiago/sipgo"
@@ -154,6 +155,54 @@ func (s *Server) startLines(ctx context.Context) {
 		return
 	}
 	st.Start(ctx)
+}
+
+// linesRegistrarWatcher is the part of the registry that wants to hear when
+// the exchange is reachable, and when it has disowned a line. Optional, as
+// linesStarter is. See pbxline.Manager.RegistrarSeen and Unregistered.
+type linesRegistrarWatcher interface {
+	RegistrarSeen()
+	Unregistered(user string)
+}
+
+// registrarSeen tells the registry the exchange has just been heard from:
+// any request from it, any response to one of ours.
+func (s *Server) registrarSeen() {
+	if w, ok := s.cfg.Lines.(linesRegistrarWatcher); ok {
+		w.RegistrarSeen()
+	}
+}
+
+// lineUnregistered tells the registry the exchange has disowned user's
+// line, so it is re-registered now.
+func (s *Server) lineUnregistered(user string) {
+	if w, ok := s.cfg.Lines.(linesRegistrarWatcher); ok {
+		w.Unregistered(user)
+	}
+}
+
+// exchangeSaysUnregistered reads a failed callee INVITE for CUCM's way of
+// saying the calling line is not registered: 503 with Warning 399 "Unable
+// to find a device handler for the request received on port …". Any other
+// failure is the call's own business.
+func exchangeSaysUnregistered(err error) bool {
+	var res *sip.Response
+	var byVal sipgo.ErrDialogResponse
+	var byPtr *sipgo.ErrDialogResponse
+	if errors.As(err, &byVal) {
+		res = byVal.Res
+	} else if errors.As(err, &byPtr) && byPtr != nil {
+		res = byPtr.Res
+	}
+	if res == nil || res.StatusCode != 503 {
+		return false
+	}
+	for _, h := range res.GetHeaders("Warning") {
+		if strings.Contains(strings.ToLower(h.Value()), "device handler") {
+			return true
+		}
+	}
+	return false
 }
 
 // uriUser is the user part of a SIP URI, empty if it will not parse. A

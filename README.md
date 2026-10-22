@@ -156,7 +156,9 @@ overdue line within ten seconds of waking, and logs a lease that had already
 run out while it slept.
 
 `make harness-pbx-lines` runs the bench: registration, a call each way, and
-a wrong credential that must latch refused. Asterisk stands in for CUCM —
+a wrong credential that must latch refused. `make harness-pbx-outage` cuts
+the link to the PBX and back: a line re-registers at once when the exchange
+is heard from, and within the 30 s retry cap otherwise. Asterisk stands in for CUCM —
 what it can and cannot prove is in SPEC §6 item 3c, and the CUCM-only
 checklist is §7.3 item 10.
 

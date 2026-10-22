@@ -144,8 +144,17 @@ type Config struct {
 	// short expiry cannot turn the lines into a REGISTER storm.
 	MinRefresh time.Duration
 	// BackoffBase and BackoffCap bound the retry interval after a
-	// transient failure (defaults 5 s and 5 min).
+	// transient failure (defaults 5 s and 30 s). The cap was five minutes
+	// until 2026-10-22: right against a wrong password, which latches and
+	// never retries anyway, and wrong against a dead link — a line stayed
+	// unregistered for up to five minutes after the network returned, on
+	// an exchange whose lease is sixty seconds. A REGISTER every thirty
+	// seconds per line while the registrar is unreachable costs nothing.
 	BackoffBase, BackoffCap time.Duration
+	// RegistrarDebounce is the least time between a retrying line's last
+	// attempt and one prompted by RegistrarSeen (default 5 s), so a burst
+	// of traffic from the exchange prompts one attempt, not one per packet.
+	RegistrarDebounce time.Duration
 	// StartSpread is the window the first REGISTER of each line is
 	// scattered over, so lines coming up together do not stampede one PBX node
 	// (default 5 s).
@@ -185,7 +194,12 @@ func (c *Config) applyDefaults() {
 		c.BackoffBase = 5 * time.Second
 	}
 	if c.BackoffCap <= 0 {
-		c.BackoffCap = 5 * time.Minute
+		c.BackoffCap = 30 * time.Second
+	}
+	if c.RegistrarDebounce < 0 {
+		c.RegistrarDebounce = 0
+	} else if c.RegistrarDebounce == 0 {
+		c.RegistrarDebounce = 5 * time.Second
 	}
 	if c.StartSpread < 0 {
 		c.StartSpread = 0
@@ -239,6 +253,9 @@ type line struct {
 	until  time.Time
 	late   chan struct{}
 	cancel context.CancelFunc
+	// lastAttempt is when the loop last sent a REGISTER (RegistrarSeen's
+	// debounce).
+	lastAttempt time.Time
 }
 
 // New builds a manager. Nothing registers until Start.
@@ -492,6 +509,9 @@ func (m *Manager) run(ctx context.Context, l *line) {
 				}
 			}
 		}
+		l.mu.Lock()
+		l.lastAttempt = m.cfg.Now()
+		l.mu.Unlock()
 		reg, err := m.cfg.Registrar.Register(ctx, cur, m.cfg.Expiry)
 		if ctx.Err() != nil {
 			return
@@ -626,6 +646,64 @@ func (m *Manager) waitForChange(ctx context.Context, l *line) bool {
 	case <-l.wake:
 		return true
 	}
+}
+
+// RegistrarSeen says the exchange has just been heard from — a request it
+// sent us, a response to something we sent it — so a line that is retrying
+// because it could not be reached should try again now rather than at the
+// end of its backoff. Lines that are registered or refused are left alone:
+// a refused line waits for a new credential, and nothing else.
+//
+// Why this exists: on 2026-10-22 the link to CUCM went down for twenty
+// minutes; the line's REGISTERs timed out one after another and the retry
+// interval climbed to its cap, so when the link came back the next attempt
+// was minutes away — while an INVITE from the app had already reached the
+// exchange and been answered. The answer was the proof; nothing read it.
+//
+// Safe on a nil receiver, like the other accessors.
+func (m *Manager) RegistrarSeen() {
+	if m == nil {
+		return
+	}
+	now := m.cfg.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, l := range m.lines {
+		l.mu.Lock()
+		retrying := l.status.State == StateRetrying && now.Sub(l.lastAttempt) >= m.cfg.RegistrarDebounce
+		dn := l.cur.DN
+		l.mu.Unlock()
+		if retrying {
+			m.cfg.Log.Info("pbx line: the exchange is reachable again; re-registering now", "line", l.cur.User, "dn", dn)
+			l.signal()
+		}
+	}
+}
+
+// Unregistered says the exchange has answered a request on this user's
+// line with "I do not know this device" — CUCM's 503 with Warning 399
+// "Unable to find a device handler" — so whatever this side believes, the
+// line is not registered there and is re-registered now. A refused line is
+// left alone, as in RegistrarSeen. Safe on a nil receiver.
+func (m *Manager) Unregistered(user string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	l, ok := m.lines[user]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	l.mu.Lock()
+	st := l.status.State
+	dn := l.cur.DN
+	l.mu.Unlock()
+	if st == StateRefused {
+		return
+	}
+	m.cfg.Log.Warn("pbx line: the exchange says this line is not registered; re-registering now", "line", user, "dn", dn, "was", st)
+	l.signal()
 }
 
 // unregister drops one line's contact, bounded and best effort.
