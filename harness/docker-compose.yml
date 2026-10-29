@@ -74,6 +74,12 @@ services:
       - -pbx-mode=${DIALPARK_PBX_MODE:-trunk}
       - -pbx-domain=${DIALPARK_PBX_DOMAIN:-}
       - -pbx-register-expiry=${DIALPARK_PBX_EXPIRY:-1h}
+      # A PBX-leg socket per line (lines mode): an exchange binds a
+      # third-party device to the address and port it registers from, so
+      # lines sharing one socket cannot all be registered (CUCM). Empty is
+      # the one shared socket; the lines-mode scripts set 5070-5077 (with
+      # -trunk-addr :5070, its first port; 5060-5067 would take in 5061).
+      - -pbx-line-ports=${DIALPARK_PBX_LINE_PORTS:-}
       # Off here on purpose: Docker Desktop's UDP port proxy rewrites a LAN
       # phone's RTP source, and replies to that rewritten source are not
       # delivered, so learning the source (symmetric RTP) silences the phone

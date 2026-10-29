@@ -202,8 +202,9 @@ harness-pbx-outage:
 	sh harness/pbx_outage_test.sh
 
 # The merge gate for anything that touches the PBX leg: every trunk-mode
-# test, in the order they get cheaper to debug. Lines mode is an addition
-# to this server, not a change to it, and this is what says so.
+# test, in the order they get cheaper to debug, then the lines bench (a
+# socket per line, outage recovery, DTMF in lines mode). Lines mode is an
+# addition to this server, not a change to it, and this is what says so.
 # The admin API cannot disturb a call (ADMIN-API.md §4.7): admin actions
 # and a sustained flood against the admin listener while a call is
 # bridged, with the audio gate as the judge. LOAD_SECONDS=10 for a quick
@@ -226,12 +227,14 @@ harness-regression:
 	         harness-trunk harness-trunk-srtp harness-trunk-tls harness-trunk-secure \
 	         harness-trunk-stall harness-pbx-hold harness-pbx-unavailable \
 	         harness-hold-music harness-cancel-before-answer harness-delayed-offer harness-delayed-offer-opus harness-dtmf \
-	         harness-admin harness-admin-ui harness-licence; do \
+	         harness-admin harness-admin-ui harness-licence \
+	         harness-pbx-lines harness-pbx-outage; do \
 	  echo "=== $$t"; $(MAKE) $$t || { echo "REGRESSION FAILED: $$t"; exit 1; }; \
 	done; \
 	echo "=== NARROWBAND=1 harness-trunk"; NARROWBAND=1 sh harness/trunk_test.sh || exit 1; \
 	echo "=== DIRECTION=xfer-app harness-trunk"; DIRECTION=xfer-app sh harness/trunk_test.sh || exit 1; \
-	echo "ALL TRUNK-MODE TESTS PASS"
+	echo "=== LINES=1 harness-dtmf"; LINES=1 sh harness/dtmf_test.sh || exit 1; \
+	echo "ALL PBX-LEG TESTS PASS"
 
 # Regenerate the harness CA and the two trunk certificates. Run by the TLS
 # trunk tests themselves; here for when they need replacing (FORCE=1) or a
@@ -283,13 +286,19 @@ TRUNK_TLS_FLAGS = $(if $(filter 1,$(TRUNK_TLS)),-trunk "sip:$(ASTERISK_HOST):506
 # instead of trunking to it (SPEC §6 item 3c). The PBX must have been
 # installed the same way (LINES=1 sh install-ubuntu.sh), and each device
 # needs its credential, which provision.sh seeds for dev-a under PBX_LINES=1.
+# PBX_LINE_PORTS is the UDP range the lines register from, one socket per
+# line, the first port being the trunk listener (-trunk-addr :5062 below):
+# an exchange binds a device to the address and port it registers from, so
+# lines sharing a socket cannot all be registered (CUCM). Open the range
+# towards the server on the PBX side.
 PBX_MODE ?= trunk
-PBX_MODE_FLAGS = $(if $(filter lines,$(PBX_MODE)),-pbx-mode=lines -pbx-domain=$(ASTERISK_HOST),)
+PBX_LINE_PORTS ?= 5062-5099
+PBX_MODE_FLAGS = $(if $(filter lines,$(PBX_MODE)),-pbx-mode=lines -pbx-domain=$(ASTERISK_HOST) -pbx-line-ports=$(PBX_LINE_PORTS),)
 TRUNK_FLAGS = $(if $(ASTERISK_HOST),$(TRUNK_TLS_FLAGS) -trunk-addr :5062 -trunk-external-host $(DIALPARK_PUBLIC_HOST) $(if $(TRUNK_SRTP),-trunk-srtp $(TRUNK_SRTP),) $(PBX_MODE_FLAGS),)
 dev-server: server tone
 	@echo "native server on $(DIALPARK_PUBLIC_HOST); enrol the app with the dev-a code printed below (15 min), or the dev path: host $(DIALPARK_PUBLIC_HOST), port 7443, dev-a / tok_dev_a_harness_fixed (fresh data dir only — an enrolled dev-a keeps its own token)"
 	@$(if $(filter lines,$(PBX_MODE)),$(if $(ASTERISK_HOST),true,{ echo "PBX_MODE=lines needs a PBX to register to: set ASTERISK_HOST=<ubuntu-ip>"; exit 1; }),true)
-	@echo "pbx: $(if $(ASTERISK_HOST),$(if $(filter lines,$(PBX_MODE)),LINES — registering 201 to Asterisk at $(ASTERISK_HOST):5060; the PBX must have LINES=1 too,trunk to Asterisk at $(ASTERISK_HOST):$(if $(filter 1,$(TRUNK_TLS)),5061 over TLS,5060 over UDP))$(if $(TRUNK_SRTP), ; media SRTP $(TRUNK_SRTP),); listener :5062,none (set ASTERISK_HOST=<ubuntu-ip> for the PBX))"
+	@echo "pbx: $(if $(ASTERISK_HOST),$(if $(filter lines,$(PBX_MODE)),LINES — registering 201 to Asterisk at $(ASTERISK_HOST):5060 from one socket per line on $(PBX_LINE_PORTS)/udp; the PBX must have LINES=1 too,trunk to Asterisk at $(ASTERISK_HOST):$(if $(filter 1,$(TRUNK_TLS)),5061 over TLS,5060 over UDP))$(if $(TRUNK_SRTP), ; media SRTP $(TRUNK_SRTP),); listener :5062,none (set ASTERISK_HOST=<ubuntu-ip> for the PBX))"
 	@$(if $(filter 1,$(TRUNK_TLS)),test -f $(LAN_TLS)/dialpark.pem || { echo "no $(LAN_TLS)/dialpark.pem — run: OUT=lan DIALPARK_IP=$(DIALPARK_PUBLIC_HOST) ASTERISK_IP=$(ASTERISK_HOST) sh harness/tls/gen_certs.sh"; exit 1; },true)
 	( sleep 2 && DIALPARK_API=https://127.0.0.1:8081 PBX_LINES=$(if $(filter lines,$(PBX_MODE)),1,0) sh harness/provision.sh ) &
 	@mkdir -p data/logs

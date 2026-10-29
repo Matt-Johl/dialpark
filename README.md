@@ -134,6 +134,25 @@ devices by source address and port, so a trunk pointing at this server would
 swallow the calls its registered lines place. `-pbx-mode=lines` with no
 `-trunk` is refused at start-up.
 
+**One socket per line.** An exchange also binds a third-party SIP device to
+the address *and port* it registers from, one device per address: on CUCM,
+two lines registering from the one trunk socket took turns, the second to
+register displacing the first, whose refresh was then refused as a wrong
+credential (2026-10-29). `-pbx-line-ports 5062-5099` gives the PBX leg one
+UDP socket per port in the range and each line one of them: it registers
+from it with that port in Contact, the exchange's calls for it arrive on
+it, and calls placed on its behalf leave from it. The first port is the
+trunk listener (`-trunk-addr` may name it or be left out). A line keeps its
+port across restarts and credential changes, drops it with the line, and
+the admin UI shows it. Without the flag every line shares the trunk
+socket, which Asterisk accepts and CUCM does not; the server says so at
+start-up.
+
+**Ports to open.** Towards the apps: 7443/tcp and 5061/tcp (TLS). Towards
+the PBX: the media relay's `-rtp-min`..`-rtp-max`/udp both ways, and the
+PBX leg's signalling — `-trunk-addr` (5060/udp by default, 5062 for a TLS
+trunk) in trunk mode, the whole `-pbx-line-ports` range/udp in lines mode.
+
 Provisioning a line is one admin call per device; the secret is write-only
 and no read returns it:
 
@@ -155,8 +174,9 @@ day: a server that sleeps (a laptop lid, a suspended VM) re-registers every
 overdue line within ten seconds of waking, and logs a lease that had already
 run out while it slept.
 
-`make harness-pbx-lines` runs the bench: registration, a call each way, and
-a wrong credential that must latch refused. `make harness-pbx-outage` cuts
+`make harness-pbx-lines` runs the bench: registration from a socket per
+line (the two contacts the PBX holds name different ports), a call each
+way, and a wrong credential that must latch refused. `make harness-pbx-outage` cuts
 the link to the PBX and back: a line re-registers at once when the exchange
 is heard from, and within the 30 s retry cap otherwise. Asterisk stands in for CUCM —
 what it can and cannot prove is in SPEC §6 item 3c, and the CUCM-only

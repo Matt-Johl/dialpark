@@ -196,7 +196,10 @@ Ubuntu box: 5060/udp (SIP), **5061/tcp only with `TRUNK_TLS=1`** (SIP over
 TLS), 10000–10200/udp (RTP, `rtp.conf`).
 Mac: 5061/tcp+tls and 7443/tls (light server, app side), **5062** (the
 server's trunk listener — udp for a plain trunk, tcp/tls for a TLS one),
-20000–20100/udp (server media relay).
+20000–20100/udp (server media relay). In lines mode (`PBX_MODE=lines`) the
+PBX leg is **5062–5099/udp** (`PBX_LINE_PORTS`): one socket per line, the
+first being the trunk listener, because an exchange binds a registered
+device to the address and port it registers from.
 
 5062 rather than the conventional 5061 for a TLS trunk: 5061 is the app
 leg's port and two SIP listeners on one address cannot share it. The server

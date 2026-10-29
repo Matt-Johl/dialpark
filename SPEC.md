@@ -902,10 +902,12 @@ on by config — see §7.4.
      `{dn, digest_user, configured}`. This is the route item 9's Device
      page needs, and the reason 3c is ordered before it: shipping the
      admin UI first means reopening it immediately.
-     *Calls.* Inbound is unchanged — the INVITE arrives on the same
-     listener at our registered Contact with the DN in `To`, `routing`
-     resolves it to the local user, and a sleeping phone is woken exactly
-     as today. Outbound in lines mode sends `From: sip:<caller's
+     *Calls.* Inbound arrives at our registered Contact with the DN in
+     `To` and, since 2026-10-29, on the line's own socket: with
+     `-pbx-line-ports` the line a call belongs to is the one holding the
+     port it arrived on (the `To` user is the fallback, and what
+     identified it before), `routing` resolves that user, and a sleeping
+     phone is woken exactly as today. Outbound in lines mode sends `From: sip:<caller's
      DN>@<pbx-domain>` and answers a 401/407 on the INVITE with that
      line's credentials (sipgo's `AnswerOptions` already does this; no
      vendor patch). A caller with no line — a transfer target, an echo leg
@@ -942,8 +944,26 @@ on by config — see §7.4.
      identity, a wrong password latching refused, and one line failing
      without disturbing another's call. `make harness-pbx-lines`.
      What it cannot prove, and what therefore stays open until a CUCM
-     exists: that CUCM matches a registration to a third-party device by
-     digest user and DN; ~~its realm and challenge shape~~ (*answered
+     exists: ~~that CUCM matches a registration to a third-party device by
+     digest user and DN~~ (*answered 2026-10-29, and not that:* CUCM binds
+     a third-party device to the **address and port** the REGISTER came
+     from, one device per address. Two lines registering from the one
+     trunk socket took turns — the second to register displaced the first,
+     whose next refresh from the same socket was treated as the second
+     device's and refused 401 as a wrong credential, the 10910/10911 bench
+     19:15–19:18. Asterisk keys lines by address of record and never
+     showed it. Hence `-pbx-line-ports first-last`: one UDP socket per
+     port, one line per socket, the first port the trunk listener; a line
+     registers from, is called on and calls out of its own, keeps it in
+     its device record across restarts, and the admin UI shows it. The
+     sockets live in the one sipgo/diago stack, which needed five vendor
+     patches — UDP recording the socket a request arrived on, a response
+     leaving from that socket, a request pinned to a port resolving to its
+     listener, in-dialog requests carrying the dialog's socket, and a
+     diago transport opting into all that — each a no-op for a single
+     socket; `internal/b2bua/line_ports_test.go` proves them on real
+     sockets and `harness-pbx-lines` asserts two contacts on two ports);
+     ~~its realm and challenge shape~~ (*answered
      2026-10-17:* realm `ccmsipline`, MD5, no qop — and one nonce handed
      to every line that registers in the same instant, so the second to
      answer it is re-challenged with a new nonce and no `stale=true`;
@@ -989,8 +1009,11 @@ on by config — see §7.4.
      `harness-test`, `harness-call`, `harness-wake`, `harness-qos`,
      `harness-trunk` (plus `NARROWBAND=1` and `DIRECTION=xfer-app`),
      `harness-trunk-srtp`, `-tls`, `-secure`, `-stall`,
-     `harness-pbx-hold`, `harness-pbx-unavailable`, `harness-hold-music`
-     and `harness-cancel-before-answer`. Under it, a golden test on the
+     `harness-pbx-hold`, `harness-pbx-unavailable`, `harness-hold-music`,
+     `harness-cancel-before-answer`, `harness-delayed-offer` (plus
+     `-opus`), `harness-dtmf` (plus `LINES=1`), `harness-admin`,
+     `harness-admin-ui`, `harness-licence`, and the lines bench itself,
+     `harness-pbx-lines` and `harness-pbx-outage`. Under it, a golden test on the
      outbound trunk INVITE (start line, From, To, Contact, transport) so
      an accidental identity change fails a unit test long before the
      harness, and a test that `-pbx-mode=trunk` constructs no line manager
@@ -2375,7 +2398,11 @@ suite once on-device. Switching siblings changes delivery, not behaviour.
     wrong digest password — the line latches refused, logs once, and no
     other line is disturbed; (h) if the cluster has more than one node,
     which node the INVITEs arrive from, which is the input to the
-    cluster-failover item under §6 "Much later".
+    cluster-failover item under §6 "Much later"; (i) **two devices
+    registered at once** with `-pbx-line-ports` set, each shown on its own
+    port in the admin UI, a call each way on each, and no "credential
+    refused" for either while both are up (one at a time was all the
+    shared socket allowed, 2026-10-29).
 
 Each is a short checklist backed by structured os_log/signpost output — not an
 open-ended "test the app".

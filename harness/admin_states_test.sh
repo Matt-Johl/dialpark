@@ -134,7 +134,7 @@ docker rm -f states-browser >/dev/null 2>&1
 $COMPOSE down -v >/dev/null 2>&1
 
 echo "== phase 2: lines mode — the PBX line column"
-export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk DIALPARK_PBX_EXPIRY=120s
+export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk DIALPARK_PBX_EXPIRY=120s DIALPARK_PBX_LINE_PORTS=5070-5077 DIALPARK_TRUNK_ADDR=:5070
 $COMPOSE up --build -d dialpark asterisk >/dev/null 2>&1
 sleep 2
 PBX_LINES=1 sh harness/innet.sh "$NET" harness/provision.sh >/dev/null
