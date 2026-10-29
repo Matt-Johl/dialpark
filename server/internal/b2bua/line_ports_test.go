@@ -347,6 +347,47 @@ func liveLines(ports []int) portLines {
 	}
 }
 
+// A request on behalf of a line before its listener is up fails and takes
+// nothing: the line loops start before the listeners are bound, and a
+// client socket on the line's port would leave the listener with "address
+// already in use" (lines bench 2026-10-29, one run in three). The
+// registrar retries on its backoff.
+func TestLineRequestBeforeTheListenerIsUpTakesNoPort(t *testing.T) {
+	ports := freePortRange(t, 2)
+	tlsCfg, _, err := tlsutil.LoadOrKeep("", "", []string{"127.0.0.1"}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(nil)
+	cfg := Config{
+		TLS: tlsCfg, BindHost: "127.0.0.1", Port: freePort(t, "tcp"), ExternalHost: "127.0.0.1",
+		Domains: []string{"dialpark"}, Trunk: udpTrunk("127.0.0.1"),
+		TrunkBind: fmt.Sprintf("0.0.0.0:%d", ports[0]), TrunkExternalHost: "127.0.0.1",
+		LinePorts: pbxline.PortRange{First: ports[0], Last: ports[1]},
+		Logger:    slog.New(slog.NewTextHandler(tWriter{t}, nil)),
+	}
+	s, err := New(cfg, reg, routing.New(reg, cfg.Domains, func() bool { return true }), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not served: no listener holds any line port.
+	pbx := newRawPBX(t)
+	params := sip.NewParams()
+	params.Add("transport", "udp")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err = s.LineClient(ports[1]).Do(ctx, sip.NewRequest(sip.OPTIONS, sip.Uri{Scheme: "sip", Host: "127.0.0.1", Port: pbx.port(), UriParams: params}))
+	if err == nil || !strings.Contains(err.Error(), "no udp listener") {
+		t.Fatalf("a request before the listener is up: err = %v, want a refusal naming the missing listener", err)
+	}
+	// The port is still free for the listener.
+	l, err := net.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", ports[1]))
+	if err != nil {
+		t.Fatalf("the line port was taken by the request: %v", err)
+	}
+	l.Close()
+}
+
 // A line's REGISTER leaves from the line's own socket and names its port,
 // even after the exchange has spoken to another socket last (the
 // remote-keyed pool then names that one).

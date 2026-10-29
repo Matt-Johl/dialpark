@@ -207,7 +207,11 @@ upstream release named in `modules.txt`; re-apply when bumping.
   fell through to binding a second socket on the port (address in use),
   which is why diago drops the port for a wildcard bind. An index by port,
   consulted only for that shape of `Laddr`, which nothing working produced
-  before.
+  before. A port with no listener yet is an error, not a socket: a REGISTER
+  sent as the server starts (the line loops begin before the listeners are
+  up) would otherwise bind the line's port itself and the listener then
+  failed with "address already in use" (lines bench, 2026-10-29, one run
+  in three). The registrar's backoff retries it.
 - `client.go` (`applyConnAddr`, from `TransactionRequest`, `newTransaction`
   and `WriteRequest`) and `sip/request.go` (`newCancelRequest` keeps
   `Laddr`) — in-dialog requests carry the client's connection address.

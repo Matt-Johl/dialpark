@@ -437,6 +437,12 @@ func (l *TransportLayer) ClientRequestConnection(ctx context.Context, req *Reque
 	// CreateConnection would fail binding a second socket on the port.
 	if network == "udp" && laddr.Port > 0 && (laddr.IP == nil || laddr.IP.IsUnspecified()) {
 		c = l.udp.listenerConnection(laddr.Port)
+		if c == nil {
+			// Never bind one here: the listener may simply not be up yet
+			// (a REGISTER sent as the server starts), and a socket created
+			// now would take its port from under it. The caller retries.
+			return nil, fmt.Errorf("no udp listener on port %d yet", laddr.Port)
+		}
 	}
 
 	if c == nil {
