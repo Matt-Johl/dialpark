@@ -24,11 +24,19 @@ type TransportUDP struct {
 	log             *slog.Logger
 	connectionReuse bool
 	readFilter      TransportReadFilter
+
+	// listeners indexes the Serve()d sockets by local port (Dialler patch),
+	// so a client that pins a port but not an address can be routed to the
+	// listener on that port. Pool keys are the literal LocalAddr() string
+	// ("[::]:5062"), which nothing building an Addr from "0.0.0.0" matches.
+	listenersMu sync.Mutex
+	listeners   map[int]*UDPConnection
 }
 
 func (t *TransportUDP) init(par *Parser) {
 	t.parser = par
 	t.pool = newConnectionPool()
+	t.listeners = make(map[int]*UDPConnection)
 	if t.log == nil {
 		t.log = DefaultLogger()
 	}
@@ -60,8 +68,34 @@ func (t *TransportUDP) Serve(conn net.PacketConn, handler MessageHandler) error 
 	}
 
 	t.pool.Add(c.PacketAddr, c)
+	if _, port, err := ParseAddr(c.PacketAddr); err == nil && port > 0 {
+		t.listenersMu.Lock()
+		t.listeners[port] = c
+		t.listenersMu.Unlock()
+		defer func() {
+			t.listenersMu.Lock()
+			if t.listeners[port] == c {
+				delete(t.listeners, port)
+			}
+			t.listenersMu.Unlock()
+		}()
+	}
 	t.readListenerConnection(c, c.PacketAddr, handler)
 	return nil
+}
+
+// listenerConnection returns the Serve()d socket bound on port, with a
+// reference taken as pool.Get does (release with TryClose), or nil when no
+// listener holds that port. Dialler patch; see ClientRequestConnection.
+func (t *TransportUDP) listenerConnection(port int) Connection {
+	t.listenersMu.Lock()
+	c := t.listeners[port]
+	t.listenersMu.Unlock()
+	if c == nil {
+		return nil
+	}
+	c.Ref(1)
+	return c
 }
 
 func (t *TransportUDP) ResolveAddr(addr string) (net.Addr, error) {
@@ -181,7 +215,7 @@ func (t *TransportUDP) readListenerConnection(conn *UDPConnection, laddr string,
 			acceptedAddr[rastr] = struct{}{}
 		}
 
-		t.parseAndHandle(data, rastr, handler)
+		t.parseAndHandle(data, rastr, laddr, handler)
 		lastRaddr = rastr
 	}
 }
@@ -214,7 +248,7 @@ func (t *TransportUDP) readListenerConnection(conn *UDPConnection, laddr string,
 	}
 } */
 
-func (t *TransportUDP) parseAndHandle(data []byte, src string, handler MessageHandler) {
+func (t *TransportUDP) parseAndHandle(data []byte, src string, laddr string, handler MessageHandler) {
 	// Check is keep alive
 	if len(data) <= 4 {
 		//One or 2 CRLF
@@ -233,6 +267,12 @@ func (t *TransportUDP) parseAndHandle(data []byte, src string, handler MessageHa
 	msg.SetTransport(t.Network())
 	// Current transaction are taking connection but for UDP they can forward on different src address
 	msg.SetSource(src) // By default we expect our source is behind NAT. https://datatracker.ietf.org/doc/html/rfc3581#section-6
+	// Dialler patch: record the socket this datagram was read on, as TCP
+	// does, so a server with several UDP listeners can tell them apart
+	// (diago transportForRequest) and answer from the right one
+	// (TransportLayer.serverRequestConnection). laddr is the same string
+	// the socket is pooled under.
+	msg.SetReceivedOn(laddr)
 	handler(msg)
 }
 

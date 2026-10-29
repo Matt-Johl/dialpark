@@ -129,6 +129,13 @@ upstream release named in `modules.txt`; re-apply when bumping.
   likewise: a received payload type is looked up in the negotiated list
   first, and one in neither list is accounted under the session's audio
   codec and passed on; upstream dropped every such packet with a warning.
+- `diago.go` (`Transport.SendFromListener`, `createClient`) — opt-in: a
+  UDP transport bound to a wildcard address pins its client to
+  `0.0.0.0:BindPort` instead of dropping the port, so its requests leave
+  from its own listener (sipgo resolves the wildcard-plus-port shape, see
+  the sipgo entries). Off, `createClient` is upstream's code path for every
+  input. Lines mode sets it on every PBX-leg transport so each line's
+  REGISTER, INVITE and in-dialog requests leave from that line's port.
 
 ## github.com/emiago/sipgo
 
@@ -174,3 +181,38 @@ upstream release named in `modules.txt`; re-apply when bumping.
   2026-09-20). The reader clears its own read deadline on start; nothing
   ever cleared the write one. UDP writes never block, so the read deadline
   is the whole of what was needed.
+
+- `sip/transport_udp.go` (`parseAndHandle`) and `sip/request.go`
+  (`cloneRequest` keeps `recvOn`) — UDP now records `ReceivedOn` as TCP
+  does above: the listener's `LocalAddr()`, the same string `Serve` pools
+  it under; and a cloned request (the INVITE a server dialog is built on)
+  keeps it, which the clone had dropped. Lines mode runs one UDP socket per registered PBX line
+  (SPEC §6 item 3c, CUCM binds a third-party device to the address and
+  port it registers from, 2026-10-29), and without this diago's
+  `transportForRequest` saw every line's INVITE as the first UDP
+  transport's: wrong Contact port, wrong client, and the exchange refusing
+  a dialog it saw answered from another device's port.
+- `sip/transport_layer.go` (`serverRequestConnection`) — a UDP request is
+  answered from the socket it was read on (`ReceivedOn`) before the
+  source-keyed lookup. That key is rewritten by every listener that hears
+  from the source (`readListenerConnection`), so with several listeners it
+  named whichever one spoke last. UDP only: TCP pools accepted connections
+  under the listener's address, where this lookup would be wrong, and
+  reliable transports are answered on the request's connection already.
+- `sip/transport_udp.go` (`listeners`, `listenerConnection`) and
+  `sip/transport_layer.go` (`ClientRequestConnection`) — a request pinned
+  to a port with no, or a wildcard, local address goes out of the listener
+  bound on that port. Pool keys are the literal `LocalAddr()`
+  (`[::]:5062`), which no `Addr` built from `0.0.0.0` matches, so upstream
+  fell through to binding a second socket on the port (address in use),
+  which is why diago drops the port for a wildcard bind. An index by port,
+  consulted only for that shape of `Laddr`, which nothing working produced
+  before.
+- `client.go` (`applyConnAddr`, from `TransactionRequest`, `newTransaction`
+  and `WriteRequest`) and `sip/request.go` (`newCancelRequest` keeps
+  `Laddr`) — in-dialog requests carry the client's connection address.
+  `clientRequestBuildReq` copied it onto a request built from scratch, but
+  every in-dialog request is sent with an explicit option and skipped it,
+  so a BYE for a line's dialog left from whatever socket last spoke to the
+  PBX while its Via named the line's port. Same predicate as the
+  from-scratch path, so a client with no connection address is untouched.

@@ -430,12 +430,23 @@ func (l *TransportLayer) ClientRequestConnection(ctx context.Context, req *Reque
 	laddr := req.Laddr
 	req.raddr = raddr
 
-	// This is probably client forcing host:port
-	if laddr.IP != nil && laddr.Port > 0 {
-		c = transport.GetConnection(laddr.String())
-	} else if l.connectionReuse {
-		addr := raddr.String()
-		c = transport.GetConnection(addr)
+	// Dialler patch: a pinned port with no address, or a wildcard one,
+	// means "the listener on that port". Its pool key is whatever
+	// LocalAddr() printed ("[::]:5062"), which laddr.String()
+	// ("0.0.0.0:5062") never equals, so the lookup below would miss and
+	// CreateConnection would fail binding a second socket on the port.
+	if network == "udp" && laddr.Port > 0 && (laddr.IP == nil || laddr.IP.IsUnspecified()) {
+		c = l.udp.listenerConnection(laddr.Port)
+	}
+
+	if c == nil {
+		// This is probably client forcing host:port
+		if laddr.IP != nil && laddr.Port > 0 {
+			c = transport.GetConnection(laddr.String())
+		} else if l.connectionReuse {
+			addr := raddr.String()
+			c = transport.GetConnection(addr)
+		}
 	}
 
 	if c == nil {
@@ -521,6 +532,22 @@ func (l *TransportLayer) serverRequestConnection(ctx context.Context, req *Reque
 
 		/// Set request addr here which is used for response build and setting received and rport if needed
 		req.raddr = raddr
+
+		// Dialler patch: over UDP the response leaves from the socket the
+		// request was read on. The source-keyed entry below is rewritten
+		// by every listener that hears from that source
+		// (TransportUDP.readListenerConnection), so with several UDP
+		// listeners it names whichever one spoke last, not the one this
+		// request came in on. UDP only: TCP pools accepted connections
+		// under the listener's address, where this lookup would be wrong,
+		// and reliable transports were answered above.
+		if !IsReliable(network) {
+			if ro := req.ReceivedOn(); ro != "" {
+				if c := transport.GetConnection(ro); c != nil {
+					return c, nil
+				}
+			}
+		}
 
 		// Check by source
 		if c := transport.GetConnection(sourceAddr); c != nil {

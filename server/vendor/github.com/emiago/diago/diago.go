@@ -79,6 +79,14 @@ type Transport struct {
 
 	RewriteContact bool
 
+	// SendFromListener (Dialler patch) makes requests sent out of this UDP
+	// transport leave from its listener socket even when BindHost is a
+	// wildcard, so their source port is BindPort. Upstream drops the port
+	// in that case (createClient) and lets sipgo pick a socket by remote
+	// address, which allows one listener per peer at most. Off by
+	// default: a single listener behaves as it always has.
+	SendFromListener bool
+
 	client *sipgo.Client
 }
 
@@ -924,20 +932,29 @@ func (dg *Diago) createClient(tran Transport) (client *sipgo.Client) {
 	if tran.Transport == "udp" {
 		resolvedIP := tran.bindIP
 		bindPort := tran.BindPort
-		if resolvedIP != nil {
-			if resolvedIP.IsUnspecified() && tran.mediaBindIP != nil {
-				resolvedIP = tran.mediaBindIP
-				bindPort = 0
+		unspecified := resolvedIP == nil || resolvedIP.IsUnspecified()
+		if unspecified && tran.SendFromListener && bindPort > 0 {
+			// Dialler patch: wildcard address plus port. sipgo resolves
+			// that shape to the listener bound on the port
+			// (TransportLayer.ClientRequestConnection), so every request
+			// out of this transport carries its own source port.
+			opts = append(opts, sipgo.WithClientConnectionAddr(net.JoinHostPort("0.0.0.0", strconv.Itoa(bindPort))))
+		} else {
+			if resolvedIP != nil {
+				if resolvedIP.IsUnspecified() && tran.mediaBindIP != nil {
+					resolvedIP = tran.mediaBindIP
+					bindPort = 0
+				}
 			}
-		}
 
-		hostname := ""
-		if resolvedIP != nil && !resolvedIP.IsUnspecified() {
-			hostname = resolvedIP.String()
-		}
+			hostname := ""
+			if resolvedIP != nil && !resolvedIP.IsUnspecified() {
+				hostname = resolvedIP.String()
+			}
 
-		if hostname != "" {
-			opts = append(opts, sipgo.WithClientConnectionAddr(net.JoinHostPort(hostname, strconv.Itoa(bindPort))))
+			if hostname != "" {
+				opts = append(opts, sipgo.WithClientConnectionAddr(net.JoinHostPort(hostname, strconv.Itoa(bindPort))))
+			}
 		}
 	}
 
