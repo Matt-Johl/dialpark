@@ -856,10 +856,20 @@ on by config — see §7.4.
      *Server.* A new `internal/pbxline` holds one `Line{user, dn,
      digest_user, secret}` per configured device, each with its own
      registration state machine: register → refresh at 0.75 × the granted
-     expiry → jittered backoff on a transient failure → **latch "refused"
+     expiry → jittered backoff on a transient failure (5 s doubling to a
+     30 s cap — five minutes until 2026-10-22, when a twenty-minute link
+     outage to CUCM left the line unregistered for minutes after the link
+     returned; against a sixty-second lease that is wrong, and a wrong
+     password never reaches the backoff anyway) → **latch "refused"
      after a 401/403 retry**, so a wrong password logs once instead of
      hammering the exchange, and start-up is jittered so fifty lines do
-     not stampede one node. The refresh deadline is a time of day, watched
+     not stampede one node. A retrying line also tries again the moment
+     the exchange is heard from — any request it sends, any response to
+     one of ours (`RegistrarSeen`) — and a line the exchange disowns on a
+     call (CUCM's 503 with Warning 399 "Unable to find a device handler")
+     is re-registered at once whatever this side believed
+     (`Unregistered`). `make harness-pbx-outage` black-holes the PBX leg
+     and asserts both. The refresh deadline is a time of day, watched
      by one 10 s sweep for all lines, because the timer it sleeps on counts
      only time the machine is awake while the exchange's lease counts the
      clock: an 18-minute clamshell sleep on the dev Mac left line 201 with

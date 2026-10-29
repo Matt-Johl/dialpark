@@ -673,10 +673,16 @@ func (s *Server) authorized(req *sip.Request, tx sip.ServerTransaction, enrolled
 // address (SPEC §4.4 rule 7), so neither is challenged.
 func (s *Server) authMiddleware(next sipgo.RequestHandler) sipgo.RequestHandler {
 	return func(req *sip.Request, tx sip.ServerTransaction) {
+		fromPBX := isTrunkSource(req.Transport(), req.Source(), s.cfg.Trunk, s.cfg.TrunkPeers)
+		if fromPBX {
+			// Anything the exchange sends — an OPTIONS poll, a NOTIFY, a
+			// call — proves it is reachable: a line retrying its REGISTER
+			// need not wait out its backoff (lines.go, registrarSeen).
+			s.registrarSeen()
+		}
 		// The PBX's unsolicited NOTIFYs never belong to a dialog, and diago
 		// would answer them 400 for exactly that reason (pbxNotify).
-		if req.Method == sip.NOTIFY && !inDialog(req) &&
-			isTrunkSource(req.Transport(), req.Source(), s.cfg.Trunk, s.cfg.TrunkPeers) {
+		if req.Method == sip.NOTIFY && !inDialog(req) && fromPBX {
 			s.pbxNotify(req, tx)
 			return
 		}
@@ -1474,6 +1480,11 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 	// caller, so the caller generates its own ring-back either way.
 	onResp := func(res *sip.Response) error {
 		answered.Store(true)
+		if l.calleeTrunk {
+			// Any response from the exchange, 100 Trying included, is the
+			// exchange being reachable (lines.go, registrarSeen).
+			s.registrarSeen()
+		}
 		if res != nil && res.StatusCode >= 180 && res.StatusCode < 200 && l.ring != nil {
 			l.ring()
 		}
@@ -1652,6 +1663,11 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 			return why
 		}
 		log.Error("invite callee", "dst", dst.String(), "offered", codecNames(out.Media().MediaSession()), "err", err)
+		if l.calleeTrunk && exchangeSaysUnregistered(err) {
+			// CUCM's "Unable to find a device handler": the line this call
+			// went out on is not registered there, whatever we believe.
+			s.lineUnregistered(in.FromUser())
+		}
 		_ = out.Hangup(out.Context())
 		out.Close()
 		if in.Context().Err() == nil {

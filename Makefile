@@ -194,6 +194,13 @@ harness-trunk-secure:
 harness-pbx-lines:
 	sh harness/pbx_lines_test.sh
 
+# The link to the PBX goes down and comes back (lines bench): a line must
+# re-register at once when the exchange is heard from, and within the retry
+# cap when it is not. Black-holes the server's packets to the PBX with a tc
+# filter. Publishes no host ports.
+harness-pbx-outage:
+	sh harness/pbx_outage_test.sh
+
 # The merge gate for anything that touches the PBX leg: every trunk-mode
 # test, in the order they get cheaper to debug. Lines mode is an addition
 # to this server, not a change to it, and this is what says so.
