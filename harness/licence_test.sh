@@ -21,8 +21,10 @@ trap cleanup EXIT
 
 start_shell() {
   docker rm -f licence-shell >/dev/null 2>&1 || true
-  docker run -d --name licence-shell --network "$NET" -v "$(pwd):/repo:ro" -w /repo alpine:3.20 sh -c 'apk add -q curl >/dev/null 2>&1; touch /ready; sleep 3600' >/dev/null
-  until docker exec licence-shell test -f /ready 2>/dev/null; do sleep 1; done
+  # The image ships curl: no apk fetch at test time (which not every
+  # network allows, 2026-10-29). It runs unprivileged, hence /tmp.
+  docker run -d --name licence-shell --network "$NET" -v "$(pwd):/repo:ro" -w /repo --entrypoint sh curlimages/curl:8.11.1 -c 'touch /tmp/ready; sleep 3600' >/dev/null
+  until docker exec licence-shell test -f /tmp/ready 2>/dev/null; do sleep 1; done
 }
 api() { docker exec licence-shell curl -sk -H 'Authorization: Bearer harness' -H 'Content-Type: application/json' "$@"; }
 # put FILE — installs the licence in FILE, prints "HTTP <code> <body>"
