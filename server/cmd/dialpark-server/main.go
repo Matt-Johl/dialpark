@@ -90,6 +90,7 @@ func main() {
 		pbxPeers     = flag.String("pbx-peers", "", "further PBX addresses to trust as a call source over a TLS trunk, comma-separated: a cluster originates from whichever node handles the call, and a call from an unnamed node is challenged like an app's and fails")
 		pbxExpiry    = flag.Duration("pbx-register-expiry", time.Hour, "registration lifetime asked for in -pbx-mode=lines; the refresh follows what the PBX grants, not this")
 		pbxDefLine   = flag.String("pbx-default-line", "", "the user whose line identifies a call to the PBX that has no line of its own (a transfer target dialled for a party that is itself on the PBX). Empty refuses such a call rather than sending it under someone else's number")
+		pbxLinePorts = flag.String("pbx-line-ports", "", "in -pbx-mode=lines, a UDP port range (first-last, e.g. 5062-5099) with one PBX-leg socket per port and one line per socket: each line registers from, is called on and calls out of its own port. An exchange binds a third-party SIP device to the address and port it registers from, so lines sharing one socket cannot all be registered at once (CUCM). The first port is the trunk listener; -trunk-addr may name it or be left out. Empty: every line shares the one trunk socket")
 		diagRetain   = flag.Duration("diag-retain", 30*24*time.Hour, "how long a device's uploaded diagnostics are kept under <data-dir>/diag; 0 keeps them forever")
 		showVersion  = flag.Bool("version", false, "print the build version and exit")
 	)
@@ -116,6 +117,15 @@ func main() {
 	pbxLines, err := parsePBXMode(*pbxMode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bad -pbx-mode:", err)
+		os.Exit(2)
+	}
+	linePorts, err := pbxline.ParsePortRange(*pbxLinePorts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bad -pbx-line-ports:", err)
+		os.Exit(2)
+	}
+	if linePorts.Len() > 0 && !pbxLines {
+		fmt.Fprintln(os.Stderr, "-pbx-line-ports needs -pbx-mode=lines")
 		os.Exit(2)
 	}
 	sip.SIPDebug = *sipTrace
@@ -173,6 +183,7 @@ func main() {
 		pbxPeers:              splitList(*pbxPeers),
 		pbxExpiry:             *pbxExpiry,
 		pbxDefaultLine:        *pbxDefLine,
+		pbxLinePorts:          linePorts,
 	}); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
@@ -251,6 +262,9 @@ type options struct {
 	pbxPeers       []string
 	pbxExpiry      time.Duration
 	pbxDefaultLine string
+	// pbxLinePorts gives each line its own PBX-leg socket; zero is the one
+	// shared trunk socket.
+	pbxLinePorts pbxline.PortRange
 }
 
 func run(ctx context.Context, log *slog.Logger, o options) error {
@@ -467,6 +481,7 @@ func run(ctx context.Context, log *slog.Logger, o options) error {
 		TrunkPeers:            o.pbxPeers,
 		PBXDomain:             o.pbxDomain,
 		DefaultLine:           o.pbxDefaultLine,
+		LinePorts:             o.pbxLinePorts,
 		RingTimeout:           o.ringTimeout,
 		Auth:                  sipauth.New(o.localDomain, devices),
 		Logger:                log,
@@ -687,7 +702,7 @@ func serverInfo(o options, tlsCfg *tls.Config, trunk *pbx.Trunk, started time.Ti
 	}
 	if o.pbxLines {
 		info.Mode = "lines"
-		info.PBX = &status.PBXInfo{Registrar: o.pbxRegistrar, Domain: o.pbxDomain, Peers: o.pbxPeers, RegisterExpirySeconds: int(o.pbxExpiry.Seconds()), DefaultLine: o.pbxDefaultLine}
+		info.PBX = &status.PBXInfo{Registrar: o.pbxRegistrar, Domain: o.pbxDomain, Peers: o.pbxPeers, RegisterExpirySeconds: int(o.pbxExpiry.Seconds()), DefaultLine: o.pbxDefaultLine, LinePorts: o.pbxLinePorts.String()}
 	}
 	return info
 }

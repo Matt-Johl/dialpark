@@ -105,6 +105,9 @@ type PBXInfo struct {
 	Peers                 []string `json:"peers"`
 	RegisterExpirySeconds int      `json:"register_expiry_seconds"`
 	DefaultLine           string   `json:"default_line"`
+	// LinePorts is the PBX-leg port range when each line has its own
+	// socket ("5062-5099"); empty on the shared socket.
+	LinePorts string `json:"line_ports,omitempty"`
 }
 
 // RTPInfo is the relay's port range and NAT behaviour.
@@ -203,6 +206,9 @@ type LineStatus struct {
 	Realm     string    `json:"realm,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	Attempts  int       `json:"attempts,omitempty"`
+	// Port is the PBX-leg socket the line registers from when the server
+	// runs one per line; 0 on the shared socket.
+	Port int `json:"port,omitempty"`
 }
 
 // CallRef points at the call a device is on.
@@ -304,7 +310,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			ds.SIP = &SIPStatus{Registered: true, Contact: ep.Contact, ExpiresAt: ep.Expires}
 		}
 		if l, ok := s.lines[d.User]; ok {
-			ds.Line = &LineStatus{State: string(l.State), Since: l.Since, ExpiresAt: l.ExpiresAt, Realm: l.Realm, Error: l.Error, Attempts: l.Attempts}
+			ds.Line = &LineStatus{State: string(l.State), Since: l.Since, ExpiresAt: l.ExpiresAt, Realm: l.Realm, Error: l.Error, Attempts: l.Attempts, Port: l.Port}
 		}
 		if c, ok := onCall[d.User]; ok {
 			cc := c

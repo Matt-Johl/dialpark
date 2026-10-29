@@ -43,6 +43,12 @@ type Line struct {
 	// Secret is that credential's password. It never leaves this server:
 	// it is not pushed to a device and no admin read returns it.
 	Secret string
+	// Port is the PBX-leg socket this line registers from and is called
+	// on, when the server gives each line one (b2bua.PortRange). 0 is the
+	// shared trunk socket. An exchange binds a third-party device to the
+	// address it registers from, so a line that moves port is unregistered
+	// from the old one first.
+	Port int
 }
 
 // normalised fills DN from User, which is the usual case.
@@ -96,6 +102,8 @@ type Status struct {
 	Error string `json:"error,omitempty"`
 	// Attempts is how many consecutive failures the line has seen.
 	Attempts int `json:"attempts,omitempty"`
+	// Port is the PBX-leg socket the line holds; 0 on the shared socket.
+	Port int `json:"port,omitempty"`
 }
 
 // Registration is what the PBX granted.
@@ -151,6 +159,11 @@ type Config struct {
 	// an exchange whose lease is sixty seconds. A REGISTER every thirty
 	// seconds per line while the registrar is unreachable costs nothing.
 	BackoffBase, BackoffCap time.Duration
+	// Ports is the PBX-leg port range when each line has a socket of its
+	// own; the manager does not allocate from it (the device store keeps
+	// each line's port, cmd/dialpark-server), it carries it for whoever
+	// puts lines here. Zero: one shared socket.
+	Ports PortRange
 	// RegistrarDebounce is the least time between a retrying line's last
 	// attempt and one prompted by RegistrarSeen (default 5 s), so a burst
 	// of traffic from the exchange prompts one attempt, not one per packet.
@@ -354,17 +367,24 @@ func (m *Manager) Put(in Line) {
 	defer m.mu.Unlock()
 	if ex, ok := m.lines[l.User]; ok {
 		ex.mu.Lock()
-		unchanged := ex.cur.sameCredential(l)
+		unchanged := ex.cur.sameCredential(l) && ex.cur.Port == l.Port
+		was := ex.cur
 		ex.cur = l
-		ex.status.DN, ex.status.DigestUser = l.DN, l.DigestUser
+		ex.status.DN, ex.status.DigestUser, ex.status.Port = l.DN, l.DigestUser, l.Port
 		ex.mu.Unlock()
+		if was.Port != l.Port && m.started && was.Port != 0 {
+			// The exchange holds this line's binding against the old
+			// socket's address: drop it there, or it stays bound to a
+			// socket this line no longer answers on until it lapses.
+			go m.unregister(was)
+		}
 		if !unchanged {
 			ex.signal()
 		}
 		return
 	}
 	n := &line{cur: l, wake: make(chan struct{}, 1), late: make(chan struct{}, 1)}
-	n.status = Status{User: l.User, DN: l.DN, DigestUser: l.DigestUser, State: StatePending, Since: m.cfg.Now()}
+	n.status = Status{User: l.User, DN: l.DN, DigestUser: l.DigestUser, State: StatePending, Since: m.cfg.Now(), Port: l.Port}
 	m.lines[l.User] = n
 	if m.started {
 		m.startLocked(n)
@@ -403,6 +423,15 @@ func (m *Manager) startLocked(l *line) {
 	go m.run(ctx, l)
 }
 
+// Ports is the configured PBX-leg port range, zero on one shared socket.
+// Nil-safe.
+func (m *Manager) Ports() PortRange {
+	if m == nil {
+		return PortRange{}
+	}
+	return m.cfg.Ports
+}
+
 // Credentials returns the digest credential to answer a PBX challenge for a
 // call placed on this user's behalf. Nil-safe: trunk mode has no manager.
 func (m *Manager) Credentials(user string) (digestUser, secret string, ok bool) {
@@ -435,6 +464,38 @@ func (m *Manager) Number(user string) (string, bool) {
 		return "", false
 	}
 	return l.snapshot().DN, true
+}
+
+// Port returns the PBX-leg socket this user's line holds (0 on the shared
+// socket). ok is false for a user with no line. Nil-safe.
+func (m *Manager) Port(user string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	m.mu.Lock()
+	l, ok := m.lines[user]
+	m.mu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	return l.snapshot().Port, true
+}
+
+// UserAtPort returns the user whose line holds the PBX-leg socket on port:
+// how a request the exchange sent to that socket is attributed to its line.
+// ok is false for a port no line holds, and always for 0. Nil-safe.
+func (m *Manager) UserAtPort(port int) (string, bool) {
+	if m == nil || port == 0 {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for user, l := range m.lines {
+		if l.snapshot().Port == port {
+			return user, true
+		}
+	}
+	return "", false
 }
 
 // Statuses reports every line, ordered by user. Nil-safe.
@@ -538,7 +599,11 @@ func (m *Manager) run(ctx context.Context, l *line) {
 			l.registered(now, granted, reg.Realm)
 			m.stateChanged(l)
 			if was != StateRegistered {
-				log.Info("pbx line: registered", "dn", cur.DN, "expiry", granted, "realm", reg.Realm)
+				attrs := []any{"dn", cur.DN, "expiry", granted, "realm", reg.Realm}
+				if cur.Port != 0 {
+					attrs = append(attrs, "port", cur.Port)
+				}
+				log.Info("pbx line: registered", attrs...)
 			}
 			attempt = 0
 			wait = refreshAfter(granted, m.cfg.MinRefresh)

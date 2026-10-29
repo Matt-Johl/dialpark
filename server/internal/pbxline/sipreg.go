@@ -49,13 +49,19 @@ type SIPConfig struct {
 	// Contact is where the PBX should send this server's calls — the
 	// trunk-leg listener's externally reachable address.
 	Contact sip.Uri
+	// Transport, when set, gives the client and Contact of the socket a
+	// line on port holds (b2bua.Server.LineClient and LineContact), so a
+	// line registers from, and advertises, its own port. Port 0 and nil
+	// are the shared socket: Client and Contact above.
+	Transport func(port int) (*sipgo.Client, sip.Uri, bool)
 	// UserAgent, when set, is sent as the User-Agent header.
 	UserAgent string
 }
 
-// NewSIPRegistrar builds the registrar. Client and Registrar are required.
+// NewSIPRegistrar builds the registrar. Registrar is required, and a Client
+// unless Transport provides one per line.
 func NewSIPRegistrar(cfg SIPConfig) (*SIPRegistrar, error) {
-	if cfg.Client == nil {
+	if cfg.Client == nil && cfg.Transport == nil {
 		return nil, fmt.Errorf("pbxline: no SIP client for the PBX leg")
 	}
 	if cfg.Registrar.Host == "" {
@@ -168,18 +174,45 @@ func (r *SIPRegistrar) register(ctx context.Context, l Line, expiry time.Duratio
 // reusing the previous hop's Via would be answered to the wrong place.
 func (r *SIPRegistrar) send(ctx context.Context, req *sip.Request) (*sip.Response, error) {
 	req.RemoveHeader("Via")
-	res, err := r.cfg.Client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
+	client, _ := r.transport(contactPort(req))
+	if client == nil {
+		return nil, fmt.Errorf("register %s: no SIP client for the line's socket", req.Recipient.String())
+	}
+	res, err := client.Do(ctx, req, sipgo.ClientRequestRegisterBuild)
 	if err != nil {
 		return nil, fmt.Errorf("register %s: %w", req.Recipient.String(), err)
 	}
 	return res, nil
 }
 
-// request returns the line's REGISTER, building it on first use.
+// transport is the client and Contact for a line on port: the socket per
+// line when the server has one, else the shared one.
+func (r *SIPRegistrar) transport(port int) (*sipgo.Client, sip.Uri) {
+	if r.cfg.Transport != nil {
+		if c, contact, ok := r.cfg.Transport(port); ok && c != nil {
+			return c, contact
+		}
+	}
+	return r.cfg.Client, r.cfg.Contact
+}
+
+// contactPort reads the port a REGISTER advertised, which is the socket it
+// must leave from.
+func contactPort(req *sip.Request) int {
+	if c := req.Contact(); c != nil {
+		return c.Address.Port
+	}
+	return 0
+}
+
+// request returns the line's REGISTER, building it on first use. A line that
+// has moved socket gets a new request: the binding on the new address is a
+// new one to the exchange, not a refresh of the old.
 func (r *SIPRegistrar) request(l Line) *sip.Request {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if req, ok := r.reqs[l.User]; ok {
+	_, contact := r.transport(l.Port)
+	if req, ok := r.reqs[l.User]; ok && contactPort(req) == contact.Port {
 		return req
 	}
 
@@ -196,7 +229,6 @@ func (r *SIPRegistrar) request(l Line) *sip.Request {
 	from.Params.Add("tag", sip.GenerateTagN(16))
 	to := &sip.ToHeader{Address: aor, Params: sip.NewParams()}
 
-	contact := r.cfg.Contact
 	contact.User = l.DN
 	req.AppendHeader(from)
 	req.AppendHeader(to)

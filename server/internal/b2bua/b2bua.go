@@ -34,6 +34,7 @@ import (
 	"github.com/pion/rtp"
 
 	"dialpark/server/internal/pbx"
+	"dialpark/server/internal/pbxline"
 	"dialpark/server/internal/qos"
 	"dialpark/server/internal/registry"
 	"dialpark/server/internal/routing"
@@ -169,6 +170,12 @@ type Config struct {
 	// PBXDomain is the host part of the address of record in lines mode
 	// (From towards the PBX). Empty = the trunk peer's host.
 	PBXDomain string
+	// LinePorts gives each line its own PBX-leg socket (lines mode only;
+	// see PortRange). The trunk listener binds the range's first port and
+	// every other port gets a listener of its own; a line then registers
+	// from, is called on, and calls out of the one it holds. Zero = one
+	// shared socket, as before.
+	LinePorts pbxline.PortRange
 	// TrunkPeers are further source hosts to trust as the PBX over TLS,
 	// beyond the one in Trunk. A CUCM cluster sends calls from whichever
 	// node handles them, not only the node we registered to, and a call
@@ -368,20 +375,56 @@ func New(cfg Config, reg *registry.Registry, router *routing.Router, waker Waker
 		diago.WithLogger(cfg.Logger),
 		diago.WithServerRequestMiddleware(s.authMiddleware),
 	}
+	if cfg.LinePorts.Len() > 0 && cfg.Trunk == nil {
+		return nil, errors.New("b2bua: line ports need a PBX to register to; give -trunk")
+	}
 	if cfg.Trunk != nil {
 		host, port, err := trunkBind(cfg.TrunkBind, cfg.Trunk)
 		if err != nil {
 			return nil, err
 		}
+		sameHost := func(h string) bool { return h == cfg.BindHost || h == "0.0.0.0" || cfg.BindHost == "0.0.0.0" }
 		// Both legs listening on one port is not a configuration we can
 		// serve, and the failure it produces otherwise is an "address in
 		// use" from inside diago with nothing naming which leg lost.
-		if port == cfg.Port && (host == cfg.BindHost || host == "0.0.0.0" || cfg.BindHost == "0.0.0.0") {
+		if port == cfg.Port && sameHost(host) {
 			return nil, fmt.Errorf("b2bua: trunk bind %s:%d collides with the app leg; give -trunk-addr another port", host, port)
+		}
+		if cfg.LinePorts.Len() > 0 {
+			// The range is the whole PBX leg: its first port is the trunk
+			// listener. A -trunk-addr naming another port would be a
+			// socket no line ever uses, which reads like a mistake.
+			if !strings.EqualFold(cfg.Trunk.Transport, "udp") {
+				return nil, fmt.Errorf("b2bua: line ports need a UDP trunk; the PBX leg is %s", strings.ToLower(cfg.Trunk.Transport))
+			}
+			if cfg.TrunkBind != "" && port != cfg.LinePorts.First {
+				return nil, fmt.Errorf("b2bua: -trunk-addr port %d is not the first line port %d; the line port range is the whole PBX leg", port, cfg.LinePorts.First)
+			}
+			if cfg.LinePorts.Contains(cfg.Port) && sameHost(host) {
+				return nil, fmt.Errorf("b2bua: line ports %s include the app leg's port %d", cfg.LinePorts, cfg.Port)
+			}
+			port = cfg.LinePorts.First
 		}
 		ext := cfg.TrunkExternalHost
 		if ext == "" {
 			ext = firstIPv4()
+		}
+		// One listener per line port beyond the first (which is the trunk
+		// transport below). Each is the trunk transport with its own port
+		// and name, so a leg can be dialled out of it (lineTransport) and
+		// a request read on it is attributed to it (inboundLine).
+		for p := cfg.LinePorts.First + 1; cfg.LinePorts.Len() > 0 && p <= cfg.LinePorts.Last; p++ {
+			opts = append(opts, diago.WithTransport(diago.Transport{
+				ID:               linePortTransport(p),
+				Transport:        cfg.Trunk.Transport,
+				BindHost:         host,
+				BindPort:         p,
+				ExternalHost:     ext,
+				ExternalPort:     p,
+				MediaSRTP:        srtpOption(cfg.TrunkSRTP),
+				TLSURINoSIPS:     true,
+				SendFromListener: true,
+			}))
 		}
 		opts = append(opts, diago.WithTransport(diago.Transport{
 			ID:           transportTrunk,
@@ -414,6 +457,12 @@ func New(cfg Config, reg *registry.Registry, router *routing.Router, waker Waker
 			// remaining path is TLS, and past a B2BUA nothing on this leg
 			// can promise anything about the other one.
 			TLSURINoSIPS: true,
+			// With a socket per line, every request out of a PBX-leg
+			// socket must leave from that socket (vendored diago: the
+			// upstream client picks one by remote address, which with
+			// several listeners is whichever heard from the PBX last).
+			// Off without a range, where there is one socket to pick.
+			SendFromListener: cfg.LinePorts.Len() > 0,
 		}))
 	}
 	opts = append(opts, mediaOptions(cfg)...)
@@ -431,13 +480,8 @@ const (
 	transportTrunk = "trunk"
 )
 
-// legTransport names the listener a leg belongs to.
-func legTransport(trunk bool) string {
-	if trunk {
-		return transportTrunk
-	}
-	return transportApp
-}
+// A leg is dialled out of one of them by calleeTransport (lines.go), which
+// in lines mode with a socket per line picks the calling line's own.
 
 // srtpOption is diago's per-transport setting: 0 none, 1 SDES.
 func srtpOption(m TrunkSRTPMode) int {
@@ -741,6 +785,9 @@ func (s *Server) pbxNotify(req *sip.Request, tx sip.ServerTransaction) {
 	if to := req.To(); to != nil {
 		line = to.Address.User
 	}
+	if user, ok := s.inboundLine(req); ok {
+		line = user
+	}
 	log := s.log.With("line", line, "event", event, "source", req.Source())
 	if !strings.EqualFold(name, "message-summary") {
 		log.Info("pbx notify: no subscription for this event; answered 481")
@@ -860,6 +907,17 @@ func (s *Server) serveDialog(in *diago.DialogServerSession) {
 	callee := in.ToUser()
 	callID := in.InviteRequest.CallID().Value()
 	log := s.log.With("call", callID, "from", in.FromUser(), "to", callee)
+	// A call from the exchange belongs to the line whose socket it arrived
+	// on; the To user is what identified the line before each had a
+	// socket, and still does on the shared one.
+	if s.isTrunkLeg(in) {
+		if user, ok := s.inboundLine(in.InviteRequest); ok {
+			if user != callee {
+				log = log.With("line", user)
+			}
+			callee = user
+		}
+	}
 
 	d := s.router.Resolve(callee)
 	if d.Target == routing.Unknown {
@@ -1413,7 +1471,7 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 	// The callee leg is offered the caller's codecs (Originator reads the
 	// caller's INVITE SDP, which does not require it to be answered) and
 	// symmetric RTP where the deployment wants it.
-	out, err := s.dg.NewDialog(dst, diago.NewDialogOptions{TransportID: legTransport(l.calleeTrunk)})
+	out, err := s.dg.NewDialog(dst, diago.NewDialogOptions{TransportID: s.calleeTransport(l.calleeTrunk, in.FromUser())})
 	if err != nil {
 		log.Error("new callee dialog", "dst", dst.String(), "err", err)
 		_ = in.Respond(500, "Server Internal Error", nil)
