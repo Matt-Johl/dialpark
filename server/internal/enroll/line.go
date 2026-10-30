@@ -46,7 +46,13 @@ func (s *Store) SetPBXLine(deviceID, dn, digestUser, secret string, pre ...Match
 			return err
 		}
 		now := s.now()
-		r.PBXLine = &lineRecord{DN: dn, DigestUser: digestUser, SecretEnc: sealed, UpdatedAt: now}
+		port := 0
+		if r.PBXLine != nil {
+			// A credential change keeps the socket: the exchange knows
+			// the device by it.
+			port = r.PBXLine.Port
+		}
+		r.PBXLine = &lineRecord{DN: dn, DigestUser: digestUser, SecretEnc: sealed, UpdatedAt: now, Port: port}
 		r.UpdatedAt = now
 		view = r.PBXLine.view()
 		return nil
@@ -55,6 +61,27 @@ func (s *Store) SetPBXLine(deviceID, dn, digestUser, secret string, pre ...Match
 		return PBXLine{}, err
 	}
 	return view, nil
+}
+
+// SetPBXLinePort records the PBX-leg socket the server registers deviceID's
+// line from (0 clears it). The server's to set, from the port range it runs
+// with; no admin write reaches it. Not an error for a device with no line
+// or one already on that port.
+func (s *Store) SetPBXLinePort(deviceID string, port int) error {
+	err := s.commit(func() error {
+		r, ok := s.devices[deviceID]
+		if !ok || r.PBXLine == nil || r.PBXLine.Port == port {
+			return errNoChange
+		}
+		rec := *r.PBXLine
+		rec.Port = port
+		r.PBXLine = &rec
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return nil
+	}
+	return err
 }
 
 // PBXLine returns deviceID's line, without its secret. ok is false for an
@@ -130,7 +157,7 @@ func (s *Store) PBXCredential(deviceID string) (PBXCredential, bool, error) {
 // and it will be answered as soon as the phone is in someone's hand.
 //
 // One line failing to decrypt does not hide the rest: the error names the
-// device and the others are still returned, because a fleet should not go
+// device and the others are still returned, because the other lines should not go
 // dark over one bad record.
 func (s *Store) PBXCredentials() ([]PBXCredential, error) {
 	type pending struct {
@@ -179,12 +206,28 @@ func (s *Store) credential(deviceID, user string, rec lineRecord) (PBXCredential
 	}
 	return PBXCredential{
 		DeviceID: deviceID, User: user, DN: dn,
-		DigestUser: rec.DigestUser, Secret: secret,
+		DigestUser: rec.DigestUser, Secret: secret, Port: rec.Port,
 	}, nil
 }
 
+// PBXLinePorts is the PBX-leg socket each stored line holds, by device,
+// for allocating a free one. Lines on the shared socket (0) and devices
+// with no line are left out; a revoked device's line is in, since the
+// record keeps its port for the phone that re-enrols.
+func (s *Store) PBXLinePorts() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := map[string]int{}
+	for id, r := range s.devices {
+		if r.PBXLine != nil && r.PBXLine.Port != 0 {
+			out[id] = r.PBXLine.Port
+		}
+	}
+	return out
+}
+
 func (r *lineRecord) view() PBXLine {
-	return PBXLine{DN: r.DN, DigestUser: r.DigestUser, Configured: true, UpdatedAt: r.UpdatedAt}
+	return PBXLine{DN: r.DN, DigestUser: r.DigestUser, Configured: true, UpdatedAt: r.UpdatedAt, Port: r.Port}
 }
 
 func sortCredentials(c []PBXCredential) {

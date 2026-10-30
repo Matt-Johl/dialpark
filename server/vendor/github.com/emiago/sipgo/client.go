@@ -158,6 +158,7 @@ func (c *Client) TransactionRequest(ctx context.Context, req *sip.Request, optio
 			}
 		}
 	}
+	c.applyConnAddr(req)
 
 	if c.TxRequester != nil {
 		return c.TxRequester.Request(ctx, req)
@@ -184,6 +185,7 @@ func (c *Client) newTransaction(ctx context.Context, req *sip.Request, onConnect
 			}
 		}
 	}
+	c.applyConnAddr(req)
 
 	if c.TxRequester != nil {
 		return c.TxRequester.Request(ctx, req)
@@ -312,7 +314,19 @@ func (c *Client) WriteRequest(req *sip.Request, options ...ClientRequestOption) 
 			return err
 		}
 	}
+	c.applyConnAddr(req)
 	return c.writeReq(req)
+}
+
+// applyConnAddr pins the request to this client's connection address when
+// it has none. clientRequestBuildReq does this for a request built from
+// scratch; a request sent with explicit options (every in-dialog request,
+// dialog_client.go and dialog_server.go) skipped it and left the transport
+// layer to pick a socket by remote address. Dialler patch.
+func (c *Client) applyConnAddr(req *sip.Request) {
+	if req.Laddr.IP == nil && c.connAddr.IP != nil {
+		c.connAddr.Copy(&req.Laddr)
+	}
 }
 
 func (c *Client) writeReq(req *sip.Request) error {

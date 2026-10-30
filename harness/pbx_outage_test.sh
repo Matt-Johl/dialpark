@@ -28,7 +28,7 @@ cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f harness/docker-compose.yml -f harness/docker-compose.noports.yml --profile test --profile impair"
 export DIALPARK_PUBLIC_HOST=dialpark
-export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk
+export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk DIALPARK_PBX_LINE_PORTS=5070-5077 DIALPARK_TRUNK_ADDR=:5070
 # Asterisk's minimum; the refresh is then due at 45 s and a black hole of
 # 90 s is sure to catch it (45 s + a 32 s transaction).
 export DIALPARK_PBX_EXPIRY=60s

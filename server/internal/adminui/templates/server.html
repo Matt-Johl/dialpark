@@ -39,7 +39,7 @@
   {{end}}
   {{with .Server.PBX}}
   <h2 class="mt">Lines</h2>
-  <dl><dt>Registrar</dt><dd>{{.Registrar}} · domain {{.Domain}} · expiry {{seconds .RegisterExpirySeconds}}{{if .DefaultLine}} · default line {{.DefaultLine}}{{end}}</dd></dl>
+  <dl><dt>Registrar</dt><dd>{{.Registrar}} · domain {{.Domain}} · expiry {{seconds .RegisterExpirySeconds}}{{if .DefaultLine}} · default line {{.DefaultLine}}{{end}}{{if .LinePorts}} · one socket per line on {{.LinePorts}}/udp{{else}} · one shared socket{{end}}</dd></dl>
   {{end}}
 </section>
 </div>

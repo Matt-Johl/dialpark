@@ -25,11 +25,13 @@ sh harness/innet.sh "$NET" harness/provision.sh >/dev/null
 $COMPOSE up -d admin >/dev/null 2>&1
 sleep 2
 
-# The whole browser session runs in one alpine container so the cookie jar
-# persists between requests. It prints one line per check.
-docker run --rm --network "$NET" alpine:3.20 sh -c '
+# The whole browser session runs in one container so the cookie jar
+# persists between requests. It prints one line per check. The image ships
+# curl: installing it with apk at test time needs Alpine's package CDN,
+# which not every network allows (2026-10-29), and a gate should not have
+# a dependency its test does not.
+docker run --rm --network "$NET" --entrypoint sh curlimages/curl:8.11.1 -c '
 set -u
-apk add -q curl >/dev/null 2>&1
 UI=https://admin:8443
 J=/tmp/jar
 fail() { echo "FAIL: $*"; exit 1; }

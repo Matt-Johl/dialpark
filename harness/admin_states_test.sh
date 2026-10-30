@@ -19,11 +19,13 @@ trap cleanup EXIT
 # It is started once per phase and torn down with the stack.
 start_browser() {
   docker rm -f states-browser >/dev/null 2>&1 || true
-  docker run -d --name states-browser --network "$NET" alpine:3.20 sh -c 'apk add -q curl >/dev/null 2>&1; touch /ready; sleep 3600' >/dev/null
-  until docker exec states-browser test -f /ready 2>/dev/null; do sleep 1; done
-  docker exec states-browser curl -sk -c /jar -b /jar -o /dev/null -d "username=admin&password=harness" https://admin:8443/login
+  # The image ships curl (no apk fetch at test time, which not every
+  # network allows) and runs unprivileged, hence the jar under /tmp.
+  docker run -d --name states-browser --network "$NET" --entrypoint sh curlimages/curl:8.11.1 -c 'touch /tmp/ready; sleep 3600' >/dev/null
+  until docker exec states-browser test -f /tmp/ready 2>/dev/null; do sleep 1; done
+  docker exec states-browser curl -sk -c /tmp/jar -b /tmp/jar -o /dev/null -d "username=admin&password=harness" https://admin:8443/login
 }
-ui() { docker exec states-browser curl -sk -c /jar -b /jar "$@"; }
+ui() { docker exec states-browser curl -sk -c /tmp/jar -b /tmp/jar "$@"; }
 csrf() { ui https://admin:8443/clients | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' | head -n1; }
 api() { docker exec states-browser curl -sk -H 'Authorization: Bearer harness' -H 'Content-Type: application/json' "$@"; }
 # row EXT — the Clients table row for that extension, tags stripped to text.
@@ -134,7 +136,7 @@ docker rm -f states-browser >/dev/null 2>&1
 $COMPOSE down -v >/dev/null 2>&1
 
 echo "== phase 2: lines mode — the PBX line column"
-export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk DIALPARK_PBX_EXPIRY=120s
+export ASTERISK_LINES=yes DIALPARK_PBX_MODE=lines DIALPARK_PBX_DOMAIN=asterisk DIALPARK_PBX_EXPIRY=120s DIALPARK_PBX_LINE_PORTS=5070-5077 DIALPARK_TRUNK_ADDR=:5070
 $COMPOSE up --build -d dialpark asterisk >/dev/null 2>&1
 sleep 2
 PBX_LINES=1 sh harness/innet.sh "$NET" harness/provision.sh >/dev/null

@@ -129,6 +129,10 @@ type lineRecord struct {
 	DigestUser string    `json:"digest_user"`
 	SecretEnc  string    `json:"secret_enc"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// Port is the PBX-leg socket the server gave this line when it runs
+	// one per line (SPEC §6 item 3c); 0 until then. Kept so a line keeps
+	// its port across restarts: the exchange binds the device to it.
+	Port int `json:"port,omitempty"`
 }
 
 // PBXLine is a device's line as the admin API reports it — never the
@@ -142,6 +146,10 @@ type PBXLine struct {
 	// caller reading JSON does not have to infer presence from emptiness.
 	Configured bool      `json:"configured"`
 	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	// Port is the PBX-leg socket the server registers this line from, when
+	// it runs one per line; 0 on the shared socket. Set by the server,
+	// never by a write.
+	Port int `json:"port,omitempty"`
 }
 
 // PBXCredential is one line with its secret, for the registrar alone. It is
@@ -152,6 +160,7 @@ type PBXCredential struct {
 	DN         string
 	DigestUser string
 	Secret     string
+	Port       int
 }
 
 // DeviceConfig is the device's server-managed settings as the admin API

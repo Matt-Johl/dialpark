@@ -476,7 +476,7 @@ func (c *bridgedCall) transfer(from *callLeg, referTo sip.Uri) error {
 		if err != nil {
 			return err
 		}
-		out, err := c.s.dg.NewDialog(dst, diago.NewDialogOptions{TransportID: legTransport(trunk)})
+		out, err := c.s.dg.NewDialog(dst, diago.NewDialogOptions{TransportID: c.s.calleeTransport(trunk, uriUser(other.party.URI))})
 		if err != nil {
 			return err
 		}

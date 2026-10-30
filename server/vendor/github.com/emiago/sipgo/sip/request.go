@@ -324,6 +324,8 @@ func newCancelRequest(requestForCancel *Request) *Request {
 	cancelReq.SetTransport(requestForCancel.Transport())
 	cancelReq.SetSource(requestForCancel.Source())
 	cancelReq.SetDestination(requestForCancel.Destination())
+	// Dialler patch: leave from the socket the INVITE left from.
+	cancelReq.Laddr = requestForCancel.Laddr
 
 	return cancelReq
 }
@@ -348,6 +350,8 @@ func cloneRequest(req *Request) *Request {
 	newReq.SetDestination(req.Destination())
 	newReq.raddr = req.raddr
 	newReq.Laddr = req.Laddr
+	// Dialler patch: a clone was read on the same socket as the original.
+	newReq.recvOn = req.recvOn
 
 	return newReq
 }

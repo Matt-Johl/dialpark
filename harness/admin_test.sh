@@ -57,8 +57,8 @@ trap cleanup EXIT
 # "STATUS BODY". curl is installed into the throwaway container because
 # busybox wget cannot PUT, DELETE or report a status code.
 admin() {
-  docker run --rm --network "$NET" -v "$(pwd):/repo:ro" alpine:3.20 sh -c \
-    "apk add -q curl >/dev/null 2>&1; curl -sk -o /tmp/b -w '%{http_code}' -H 'Authorization: Bearer $TOKEN' -H 'Content-Type: application/json' -X $1 '$API$2' ${3:+-d '$3'}; echo; cat /tmp/b"
+  docker run --rm --network "$NET" -v "$(pwd):/repo:ro" --entrypoint sh curlimages/curl:8.11.1 -c \
+    "curl -sk -o /tmp/b -w '%{http_code}' -H 'Authorization: Bearer $TOKEN' -H 'Content-Type: application/json' -X $1 '$API$2' ${3:+-d '$3'}; echo; cat /tmp/b"
 }
 ctl() {
   docker run --rm --network "$NET" alpine:3.20 sh -c \
@@ -138,8 +138,8 @@ fi
 echo "== load: $LOAD_SECONDS s of floods against the admin listener"
 flood() { # flood NAME SCRIPT — a container running SCRIPT until the deadline
   c="admin-flood-$1"
-  docker run -d --name "$c" --network "$NET" alpine:3.20 sh -c \
-    "apk add -q curl >/dev/null 2>&1; end=\$((\$(date +%s)+$LOAD_SECONDS)); $2" >/dev/null
+  docker run -d --name "$c" --network "$NET" --entrypoint sh curlimages/curl:8.11.1 -c \
+    "end=\$((\$(date +%s)+$LOAD_SECONDS)); $2" >/dev/null
   FLOODERS="$FLOODERS $c"
 }
 # Eight sources reading status and devices as fast as they can: far past

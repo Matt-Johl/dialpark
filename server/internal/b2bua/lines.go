@@ -3,11 +3,32 @@ package b2bua
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+
+	"dialpark/server/internal/pbxline"
 )
+
+// linePortTransport names the diago transport bound on one line port. The
+// first port of the range is the trunk transport itself (lineTransport).
+func linePortTransport(port int) string { return "line:" + strconv.Itoa(port) }
+
+// lineTransport names the PBX-leg transport a request on behalf of a line
+// on port leaves from: the trunk transport when there is no range, or the
+// port is 0 or the range's first, otherwise that port's own transport.
+func (s *Server) lineTransport(port int) string {
+	if port == 0 || port == s.cfg.LinePorts.First || !s.cfg.LinePorts.Contains(port) {
+		return transportTrunk
+	}
+	return linePortTransport(port)
+}
+
+// LinePorts is the configured range, zero when every line shares the
+// trunk socket.
+func (s *Server) LinePorts() pbxline.PortRange { return s.cfg.LinePorts }
 
 // Lines mode: the PBX knows each device as a registered line of its own
 // rather than knowing this server as one trunk peer (SPEC §6 item 3c).
@@ -30,34 +51,115 @@ func (s *Server) SetLines(l Lines) { s.cfg.Lines = l }
 // what the line registrar's REGISTERs must travel on, so the source address
 // the PBX records is the one it will send calls back to. Nil when no trunk
 // peer is configured.
-func (s *Server) TrunkClient() *sipgo.Client {
+func (s *Server) TrunkClient() *sipgo.Client { return s.LineClient(0) }
+
+// LineClient is the SIP client that sends out of the socket a line on port
+// holds (TrunkClient for 0 or a port outside the range). Nil when no trunk
+// peer is configured.
+func (s *Server) LineClient(port int) *sipgo.Client {
 	if s.cfg.Trunk == nil {
 		return nil
 	}
-	return s.dg.Client(transportTrunk)
+	return s.dg.Client(s.lineTransport(port))
 }
 
 // TrunkContact is the address a registration should ask the PBX to send
 // calls to: this server's trunk-leg listener as the PBX reaches it. The user
 // part is left empty for the registrar to fill with each line's number.
-func (s *Server) TrunkContact() (sip.Uri, bool) {
+func (s *Server) TrunkContact() (sip.Uri, bool) { return s.LineContact(0) }
+
+// LineContact is TrunkContact on the socket a line on port holds: the same
+// address, that port. 0 or a port outside the range is the trunk socket.
+func (s *Server) LineContact(port int) (sip.Uri, bool) {
 	if s.cfg.Trunk == nil {
 		return sip.Uri{}, false
 	}
-	_, port, err := trunkBind(s.cfg.TrunkBind, s.cfg.Trunk)
+	_, bound, err := trunkBind(s.cfg.TrunkBind, s.cfg.Trunk)
 	if err != nil {
 		return sip.Uri{}, false
+	}
+	if s.cfg.LinePorts.Len() > 0 {
+		bound = s.cfg.LinePorts.First
+	}
+	if s.cfg.LinePorts.Contains(port) {
+		bound = port
 	}
 	host := s.cfg.TrunkExternalHost
 	if host == "" {
 		host = firstIPv4()
 	}
-	u := sip.Uri{Scheme: "sip", Host: host, Port: port, UriParams: sip.NewParams()}
+	u := sip.Uri{Scheme: "sip", Host: host, Port: bound, UriParams: sip.NewParams()}
 	// Explicit transport, as the trunk leg's Contact carries elsewhere: a
 	// default would be read as UDP and an in-dialog request could fall back
 	// to a port nothing is listening on.
 	u.UriParams.Add("transport", strings.ToLower(s.cfg.Trunk.Transport))
 	return u, true
+}
+
+// linesPorts is the part of the registry that knows which socket each line
+// holds. Optional, as linesStarter is: a registry without it, or a server
+// without a range, keeps every line on the trunk socket.
+type linesPorts interface {
+	Port(user string) (int, bool)
+	UserAtPort(port int) (string, bool)
+}
+
+// lineUser is the user whose line a call on behalf of localUser goes out
+// under: their own, or the configured default. ok is false when neither
+// has a line.
+func (s *Server) lineUser(localUser string) (string, bool) {
+	if _, found := s.cfg.Lines.Number(localUser); found {
+		return localUser, true
+	}
+	if s.cfg.DefaultLine != "" {
+		if _, found := s.cfg.Lines.Number(s.cfg.DefaultLine); found {
+			return s.cfg.DefaultLine, true
+		}
+	}
+	return "", false
+}
+
+// calleeTransport names the PBX-leg transport a callee leg dialled on
+// behalf of localUser leaves from: in lines mode with a range, the socket
+// that user's line holds, so the exchange sees the call come from the
+// device it registered; otherwise the trunk transport, as always.
+func (s *Server) calleeTransport(calleeTrunk bool, localUser string) string {
+	if !calleeTrunk {
+		return transportApp
+	}
+	if s.cfg.Lines == nil || s.cfg.LinePorts.Len() == 0 {
+		return transportTrunk
+	}
+	lp, ok := s.cfg.Lines.(linesPorts)
+	if !ok {
+		return transportTrunk
+	}
+	user, ok := s.lineUser(localUser)
+	if !ok {
+		return transportTrunk
+	}
+	port, _ := lp.Port(user)
+	return s.lineTransport(port)
+}
+
+// inboundLine is the user whose line a request from the PBX arrived on, by
+// the socket it was read on. ok is false outside lines mode, without a
+// range, or when no line holds that port — the caller then falls back to
+// the To user, which is what identified the line before sockets did and
+// still does on the shared one.
+func (s *Server) inboundLine(req *sip.Request) (string, bool) {
+	if s.cfg.Lines == nil || s.cfg.LinePorts.Len() == 0 || req == nil {
+		return "", false
+	}
+	lp, ok := s.cfg.Lines.(linesPorts)
+	if !ok {
+		return "", false
+	}
+	_, port, err := sip.ParseAddr(req.ReceivedOn())
+	if err != nil || !s.cfg.LinePorts.Contains(port) {
+		return "", false
+	}
+	return lp.UserAtPort(port)
 }
 
 // pbxDomain is the host part of a line's address of record.
@@ -88,15 +190,11 @@ func (s *Server) trunkIdentity(localUser string) (from *sip.FromHeader, digestUs
 	if s.cfg.Lines == nil {
 		return nil, "", "", true
 	}
-	user := localUser
-	dn, found := s.cfg.Lines.Number(user)
-	if !found && s.cfg.DefaultLine != "" {
-		user = s.cfg.DefaultLine
-		dn, found = s.cfg.Lines.Number(user)
-	}
+	user, found := s.lineUser(localUser)
 	if !found {
 		return nil, "", "", false
 	}
+	dn, _ := s.cfg.Lines.Number(user)
 	digestUser, secret, _ = s.cfg.Lines.Credentials(user)
 	// No tag: diago adds one to a From it did not build, and generating a
 	// second here would be the only tag in the dialog that is not its.

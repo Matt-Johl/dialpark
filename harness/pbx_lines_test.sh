@@ -41,6 +41,13 @@ export DIALPARK_PBX_DOMAIN=asterisk
 # Short enough that a refresh happens inside a test run, long enough not to
 # be a storm: the refresh is at three quarters of what the PBX grants.
 export DIALPARK_PBX_EXPIRY=120s
+# A socket per line: each line registers from, and is called on, its own
+# port of this range (the first is the trunk listener, so -trunk-addr moves
+# with it; 5060-5067 would take in the app leg's 5061). An exchange binds a
+# third-party device to the address and port it registers from — CUCM
+# accepted one line at a time from the shared socket (2026-10-29) — so the
+# register scenario checks the two contacts name different ports.
+export DIALPARK_PBX_LINE_PORTS=5070-5077 DIALPARK_TRUNK_ADDR=:5070
 
 NET=dialpark-harness_default
 MEDIA_DIR=harness/baresip/media
@@ -90,6 +97,7 @@ if [ "$SCENARIO" = register ] || [ "$SCENARIO" = all ]; then
     sleep 1
   done
   ok=1
+  port211=""; port212=""
   for line in 211 212; do
     if $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep -q "pbx line: registered.*dn=$line"; then
       echo "   the server registered line $line"
@@ -105,7 +113,23 @@ if [ "$SCENARIO" = register ] || [ "$SCENARIO" = all ]; then
       echo "   FAIL: the PBX has no contact for line $line"
       printf '%s\n' "$contacts" | tail -6 | sed 's/^/   asterisk: /'; ok=0
     fi
+    eval "port$line=\"$(printf '%s' "$contacts" | grep -o "$line/sip:$line@172.30.0.10:[0-9]*" | head -1 | sed 's/.*://')\""
   done
+  # A socket per line (DIALPARK_PBX_LINE_PORTS): the two contacts the PBX
+  # holds name different ports of the range, and each REGISTER left from
+  # the port it advertised (the PBX's own OPTIONS go to that port, below).
+  case "$port211:$port212" in
+    507[0-7]:507[0-7])
+      if [ "$port211" = "$port212" ]; then
+        echo "   FAIL: both lines registered from port $port211; a socket per line was expected"; ok=0
+      else
+        echo "   the lines registered from their own sockets: 211 on $port211, 212 on $port212"
+      fi;;
+    *) echo "   FAIL: contact ports $port211/$port212 are not in the line port range 5070-5077"; ok=0;;
+  esac
+  if ! $COMPOSE logs --no-log-prefix dialpark 2>&1 | grep "pbx line: registered.*dn=212" | grep -q "port=$port212"; then
+    echo "   FAIL: the server's registration log for 212 does not name port $port212"; ok=0
+  fi
   # The exchange polls a registered line like any phone, and drops a contact
   # that stops answering. Our trunk listener must answer those OPTIONS.
   i=0
