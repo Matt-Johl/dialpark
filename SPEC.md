@@ -1812,6 +1812,23 @@ on by config — see §7.4.
      system call screen works too. No server change, no wire change.
      Verified the same way as the bench: a call to an IVR, and the
      server's relay line showing `events=N` in the app's direction.
+   15. **Line sockets bound on demand (server; noted 2026-10-30).** With
+     `-pbx-line-ports` the server binds every port of the range at
+     start, lines or no lines: diago fixes its transports at
+     construction, and binding the whole range once avoided a vendor
+     patch for listeners that come and go. The cost is one idle UDP
+     socket per spare port, each of which answers like the trunk socket
+     (an OPTIONS gets 200, an INVITE falls back to routing by `To`) —
+     no wider in trust than today, since any non-TLS source is already
+     taken for the PBX, but wider in reach than a phone or a PBX would
+     be. The change: bind a socket when a line takes its port and close
+     it when the line is deleted or revoked, so the server holds exactly
+     as many PBX-leg sockets as registered lines. Needs diago to add and
+     remove a transport at runtime and start and stop its listener; the
+     port stays in the device record and the firewall rule stays the
+     range. Verified by the lines bench (two contacts on two ports) plus
+     a check that an unassigned port of the range is not listening, and
+     that deleting a line frees its port within a second.
 
 ### Much later (not scheduled)
 
