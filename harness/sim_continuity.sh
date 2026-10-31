@@ -34,6 +34,8 @@ case "$SCENARIO" in
   control)  run control ;;
   backlog)  run backlog DIALPARK_LAB_PUMP_DELAY=300ms ;;
   impaired) run impaired IMPAIR=1 ;;
-  all)      run control; run backlog DIALPARK_LAB_PUMP_DELAY=300ms; run impaired IMPAIR=1 ;;
-  *) echo "unknown SCENARIO=$SCENARIO (control|backlog|impaired|all)"; exit 2 ;;
+  long)     run long CALL_SECONDS=30 ;;                  # clean 30 s: does the wish shrink excise anything?
+  long-impaired) run long-impaired IMPAIR=1 CALL_SECONDS=30 ;;
+  all)      run control; run backlog DIALPARK_LAB_PUMP_DELAY=300ms; run impaired IMPAIR=1; run long CALL_SECONDS=30; run long-impaired IMPAIR=1 CALL_SECONDS=30 ;;
+  *) echo "unknown SCENARIO=$SCENARIO (control|backlog|impaired|long|long-impaired|all)"; exit 2 ;;
 esac

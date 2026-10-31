@@ -193,6 +193,7 @@ if [ -n "${REFUSED:-}" ]; then SOURCE=""; fi
 # calls too. The simulated phone takes it with Hold & Accept, swaps back,
 # and ends both; asserted in the sim (RTP per active call, two stack ids)
 # and on phone-a's recording (it heard the sim while it was the active call).
+[ -z "${CALL_SECONDS:-}" ] || export SIMCTL_CHILD_CALL_SECONDS="$CALL_SECONDS" # lab: longer calls
 xcrun simctl spawn "$SIM" "$BIN" "$HOST" "$SIGNAL_PORT" dev-s tok_dev_s_harness_fixed "$WAIT" "$ACTIVATE_MS" "$SOURCE" "$ANSWER_MS" "$CALLS" "$MODE" "${HOLD_MS:-0}" "${TRANSFER:-}" "${KIND}${CALLWAITING:+callwaiting}${REFUSED:+refused}" > "$OUT" 2>&1 &
 PID=$!
 cleanup() {

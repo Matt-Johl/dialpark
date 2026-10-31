@@ -340,6 +340,7 @@ func judge(_ v: BaresipCallEngine.AudioVerdict?, established: Bool) -> (String, 
 }
 /// IMPAIR=1 runs export IMPAIRED=1 into the simulator process.
 let impaired = ProcessInfo.processInfo.environment["IMPAIRED"] == "1"
+let labCallSeconds = Int(ProcessInfo.processInfo.environment["CALL_SECONDS"] ?? "") ?? 0
 
 let callKit = ScriptedCallKit()
 let controller = CallController(ui: callKit, engine: engine, log: { print("\(stamp())   \($0)") })
@@ -548,7 +549,10 @@ for index in 1...callsWanted {
             else { holdResult = "PASS: hold stopped media, resume restored it" }
             out("hold: \(holdResult!)")
         }
-        if engine.audioVerdicts.contains(where: { $0.seconds == 5 }) && (holdMs == 0 || holdResult != nil) { sawVerdict = true; break }
+        // Lab: CALL_SECONDS keeps the call up past the 5 s verdict so the
+        // jitter buffer's slow shrink (1–6 s timers) has time to act.
+        let longEnough = labCallSeconds == 0 || engine.audioVerdicts.contains(where: { $0.seconds >= labCallSeconds })
+        if engine.audioVerdicts.contains(where: { $0.seconds == 5 }) && (holdMs == 0 || holdResult != nil) && longEnough { sawVerdict = true; break }
         lock.lock(); let done = ended; let failed = engineFailed; lock.unlock()
         if failed != nil { fatal = failed; break }
         if done { break }
