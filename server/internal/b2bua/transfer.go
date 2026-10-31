@@ -29,6 +29,11 @@ type callLeg struct {
 	// party is who is on this leg, for wakes and logs (the caller's From
 	// on the incoming leg, the dialled user on an outgoing one).
 	party wire.Party
+	// answeredAt is when this leg was answered (the callee's 200 OK, or
+	// ours to the caller), so the pump that reads it can say how long its
+	// RTP may have queued before the relay started (answer_to_pump_ms).
+	// Zero when unknown (a transfer target).
+	answeredAt time.Time
 }
 
 // bridgedCall owns the two legs of a call and the pumps between them, and
@@ -112,6 +117,7 @@ func (c *bridgedCall) startLocked() error {
 			return err
 		}
 		inherit(p)
+		p.setTrace(c.s.cfg.RTPTraceDir, c.callID, c.a.name+"-"+c.a.name)
 		c.pumps = []*pump{p}
 		go p.run(ctx, c.log.With("dir", c.a.name+"→"+c.a.name))
 		return nil
@@ -126,6 +132,14 @@ func (c *bridgedCall) startLocked() error {
 	}
 	inherit(ab)
 	inherit(ba)
+	// Continuity lab (2026-10-31): the first start of the call knows when
+	// each leg was answered; a restart (transfer) does not describe a start
+	// of RTP, so it carries nothing.
+	if prev == nil {
+		ab.answeredAt, ba.answeredAt = c.a.answeredAt, c.b.answeredAt
+	}
+	ab.setTrace(c.s.cfg.RTPTraceDir, c.callID, c.a.name+"-"+c.b.name)
+	ba.setTrace(c.s.cfg.RTPTraceDir, c.callID, c.b.name+"-"+c.a.name)
 	c.pumps = []*pump{ab, ba}
 	go ab.run(ctx, c.log.With("dir", c.a.name+"→"+c.b.name))
 	go ba.run(ctx, c.log.With("dir", c.b.name+"→"+c.a.name))

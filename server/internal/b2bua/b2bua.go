@@ -181,6 +181,11 @@ type Config struct {
 	// node handles them, not only the node we registered to, and a call
 	// from an untrusted source is challenged like an app's and fails.
 	TrunkPeers []string
+	// RTPTraceDir, when set, makes every relay pump write one TSV line per
+	// packet it reads into <dir>/<call id>-<from>-<to>.tsv (pump.run): a
+	// lab aid for the audio-continuity investigation (2026-10-31), off by
+	// default and never on the hot path when empty.
+	RTPTraceDir string
 }
 
 // Lines is the registered-line registry the PBX leg consults in lines mode.
@@ -1538,6 +1543,11 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 	// caller, so the caller generates its own ring-back either way.
 	onResp := func(res *sip.Response) error {
 		answered.Store(true)
+		// The callee's answer: how long its RTP may have been queuing
+		// before the pumps start (pump answer_to_pump_ms).
+		if res != nil && res.StatusCode >= 200 && res.StatusCode < 300 && legB.answeredAt.IsZero() {
+			legB.answeredAt = time.Now()
+		}
 		if l.calleeTrunk {
 			// Any response from the exchange, 100 Trying included, is the
 			// exchange being reachable (lines.go, registrarSeen).
@@ -1779,6 +1789,7 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		// type, so digits from this leg arrive as events.
 		answerCodecs = append(answerCodecs, ev)
 	}
+	legA.answeredAt = time.Now() // our 200 OK goes out now; AnswerOptions returns on its ACK
 	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
 		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)}); err != nil {
 		log.Error("answer caller", "err", err)
@@ -1970,6 +1981,13 @@ type pump struct {
 	jitterMs100 atomic.Int64
 	lastArrival time.Time
 	lastTs      uint32
+	// Arrival continuity of the source — backlog at start, bursts and gaps
+	// per window — and the optional per-packet trace (pump_continuity.go).
+	cont       continuity
+	answeredAt time.Time // when the source leg was answered; zero = unknown
+	traceDir   string    // Config.RTPTraceDir; empty = no trace
+	traceName  string    // file stem under traceDir
+	trace      *pumpTrace
 }
 
 type mediaEnd interface {
@@ -2032,7 +2050,7 @@ func (p *pump) String() string {
 	if ev, dropped := p.events.Load(), p.eventsDropped.Load(); ev > 0 || dropped > 0 {
 		s += fmt.Sprintf(" events=%d events_dropped=%d", ev, dropped)
 	}
-	return s
+	return s + " " + p.cont.summary()
 }
 
 func (p *pump) jitterMs() float64 { return float64(p.jitterMs100.Load()) / 100 }
@@ -2385,21 +2403,34 @@ func (p *pump) run(ctx context.Context, log *slog.Logger) {
 	var lastRead, lastWritten int64
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	p.cont.start(time.Now(), p.answeredAt)
+	p.openTrace(log)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// Closed here, not in run: run may return on ctx while this
+		// goroutine is still in Read, and the last packet must not write
+		// to a closed file.
+		defer p.closeTrace()
 		for {
 			n, err := p.r.Read(buf)
 			if ctx.Err() != nil {
 				return // pumps replaced (transfer) or call over
 			}
 			if n > 0 {
+				now := time.Now()
 				p.read.Add(1)
-				p.lastReadAt.Store(time.Now().UnixMilli())
+				p.lastReadAt.Store(now.UnixMilli())
+				var hdr *rtp.Header
+				if p.rr != nil {
+					hdr = &p.rr.PacketHeader
+				}
+				p.cont.noteRead(now, hdr, p.codec)
 				if p.localOnly.Load() {
 					// Hold music has this stream; what arrives is not
 					// forwarded. Counted as read, not written — which is
 					// what the 2 s line calls "we stopped forwarding".
+					p.traceRead(now, hdr, n)
 					continue
 				}
 				breaks := p.breaks.Load()
@@ -2417,6 +2448,8 @@ func (p *pump) run(ctx context.Context, log *slog.Logger) {
 				} else {
 					p.written.Add(1)
 				}
+				// After forward, so the line carries this packet's skew.
+				p.traceRead(now, hdr, n)
 				if p.breaks.Load() != breaks {
 					log.Info("relay: source timeline broke within one SSRC; rebased onto ours",
 						"jump_ms", p.lastBreakMs.Load(), "breaks", p.breaks.Load(), "after", p.String())
@@ -2445,10 +2478,14 @@ func (p *pump) run(ctx context.Context, log *slog.Logger) {
 			return
 		case <-ticker.C:
 			r, w := p.read.Load(), p.written.Load()
+			win := p.cont.window()
 			log.Info("relay", "read", r, "written", w, "write_errs", p.writeErrs.Load(),
 				"read_2s", r-lastRead, "written_2s", w-lastWritten,
 				"lost", p.lost.Load(), "reordered", p.reordered.Load(), "jitter_ms", p.jitterMs(),
-				"skew_ms", p.skewMs.Load(), "early_max_ms", p.earlyMaxMs.Load(), "late_max_ms", p.lateMaxMs.Load())
+				"skew_ms", p.skewMs.Load(), "early_max_ms", p.earlyMaxMs.Load(), "late_max_ms", p.lateMaxMs.Load(),
+				"backlog_pkts", win.backlogPkts, "backlog_ms", win.backlogMs, "first_rtp_ms", win.firstRTPMs,
+				"answer_to_pump_ms", win.answerToPumpMs,
+				"max_gap_ms", win.maxGapMs, "max_burst", win.maxBurst, "burst_ms", win.burstMs)
 			lastRead, lastWritten = r, w
 		}
 	}
