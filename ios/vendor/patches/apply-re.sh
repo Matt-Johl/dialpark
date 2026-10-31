@@ -161,3 +161,156 @@ fi
 grep -q "return $RE_PATCH_LEVEL;" "$SRC/src/main/main.c" || perl -0pi -e 's/(int re_dialler_patchlevel\(void\)\n\{\n\treturn )\d+;/${1}'"$RE_PATCH_LEVEL"';/' "$SRC/src/main/main.c"
 grep -q "return $RE_PATCH_LEVEL;" "$SRC/src/main/main.c" || { echo "patch: re patch level not updated"; exit 1; }
 echo "   re: patch level $RE_PATCH_LEVEL"
+
+# ---- Dialler lab: audio continuity events (lab/audio-continuity) ------------
+# A fixed, lock-free ring of timestamped events pushed from the play path
+# (aubuf, ajb, and from baresip's jbuf/aureceiver and the audiounit driver)
+# and read by the shim at call end. This is what tells a 20 ms frame
+# *discarded* (no silence, "something was dropped") from a frame *padded*
+# (silence). Nothing in production reads it; it exists to attribute the
+# brief drops heard on the phone. Declarations go in re_tmr.h because every
+# patched file already includes <re.h>; the implementation in tmr.c, which
+# has tmr_jiffies_usec().
+patch_insert() { # file marker anchor-file new-file mode(after|before|replace)
+  f="$1"; marker="$2"; A="$3"; N="$4"; mode="$5"
+  grep -qF "$marker" "$f" && return 0
+  A="$A" N="$N" MODE="$mode" perl -0pi -e 'BEGIN { local $/; open(my $a, "<", $ENV{A}) or die; $anchor = <$a>; close $a; open(my $n, "<", $ENV{N}) or die; $new = <$n>; close $n; }
+    $rep = $ENV{MODE} eq "after" ? $anchor.$new : $ENV{MODE} eq "before" ? $new.$anchor : $new;
+    $cnt = s/\Q$anchor\E/$rep/; die "anchor not found in $ARGV\n" unless $cnt;' "$f"
+  grep -qF "$marker" "$f" || { echo "patch: $marker not applied to $f"; exit 1; }
+}
+T="$(mktemp -d)"
+if ! grep -q 'AU_EV_AB_FIRST_DROP' "$SRC/include/re_tmr.h"; then
+cat >> "$SRC/include/re_tmr.h" <<'EOF'
+
+
+/* Dialler lab: audio continuity events (ios/vendor/patches/apply-re.sh).
+ * A fixed ring of timestamped events pushed from the audio path and read
+ * by the shim at call end. Lock-free; t_us counts from au_ev_reset(). */
+enum au_ev_kind {
+	AU_EV_NONE = 0,
+	AU_EV_MARK,          /* a=what: 1 didActivate, 2 established */
+	AU_EV_FIRST_RTP,     /* a=seq of the first packet into the jitter buffer */
+	AU_EV_JB_LATE,       /* a=seq, b=seq_get: packet too late, discarded */
+	AU_EV_JB_WISH,       /* a=old, b=new wish (frames) */
+	AU_EV_JB_FLUSH,      /* a=frames flushed */
+	AU_EV_JB_OVER,       /* a=nf, b=wish: more held than wished, the decoded frame is dropped */
+	AU_EV_JB_DROP,       /* a=ms of decoded audio discarded (aureceiver) */
+	AU_EV_AB_FIRST_DROP, /* a=ms dropped on the play buffer's first read, b=ms it held */
+	AU_EV_AB_OVERRUN,    /* a=ms dropped (oldest frame), b=ms held */
+	AU_EV_AB_UNDERRUN,   /* a=ms refill target (zeros until then), b=ms held */
+	AU_EV_AB_AJB_HIGH,   /* a=ms skipped by a second read, b=ms held */
+	AU_EV_AB_AJB_LOW,    /* a=ms not written (stale output), b=ms held */
+	AU_EV_RENDER_FIRST,  /* a=frames per callback, b=srate */
+	AU_EV_RENDER_GAP,    /* a=frames mSampleTime jumped forward, b=frames per callback */
+	AU_EV_RENDER_DUP,    /* a=frames mSampleTime went back */
+	AU_EV_RENDER_LATE,   /* a=ms since the previous callback, b=nominal ms */
+	AU_EV_REC_FIRST,     /* a=frames per callback, b=srate */
+	AU_EV_REC_OVERFLOW,  /* a=frames lost (input ring full) */
+};
+struct au_ev {
+	uint64_t t_us;
+	uint32_t kind;
+	int32_t a;
+	int32_t b;
+};
+void au_ev_reset(void);
+void au_ev_push(uint32_t kind, int32_t a, int32_t b);
+size_t au_ev_read(struct au_ev *out, size_t max);
+size_t au_ev_count(void);
+const char *au_ev_name(uint32_t kind);
+EOF
+fi
+if ! grep -q 'AU_EV_AB_FIRST_DROP' "$SRC/src/tmr/tmr.c"; then
+cat >> "$SRC/src/tmr/tmr.c" <<'EOF'
+
+
+/* Dialler lab: audio continuity events, see re_tmr.h. */
+#include <stdatomic.h>
+#define AU_EV_MAX 4096
+static struct au_ev au_evs[AU_EV_MAX];
+static atomic_uint au_ev_n;
+static _Atomic uint64_t au_ev_t0;
+
+void au_ev_reset(void)
+{
+	atomic_store(&au_ev_t0, tmr_jiffies_usec());
+	atomic_store(&au_ev_n, 0u);
+}
+
+void au_ev_push(uint32_t kind, int32_t a, int32_t b)
+{
+	uint64_t t0 = atomic_load(&au_ev_t0);
+	unsigned i;
+
+	if (!t0)
+		return;
+	i = atomic_fetch_add(&au_ev_n, 1u);
+	if (i >= AU_EV_MAX)
+		return;
+	au_evs[i].t_us = tmr_jiffies_usec() - t0;
+	au_evs[i].kind = kind;
+	au_evs[i].a = a;
+	au_evs[i].b = b;
+}
+
+size_t au_ev_count(void)
+{
+	unsigned n = atomic_load(&au_ev_n);
+	return n > AU_EV_MAX ? AU_EV_MAX : n;
+}
+
+size_t au_ev_read(struct au_ev *out, size_t max)
+{
+	size_t n = au_ev_count();
+	if (n > max)
+		n = max;
+	if (out && n)
+		memcpy(out, au_evs, n * sizeof(*out));
+	return n;
+}
+
+const char *au_ev_name(uint32_t kind)
+{
+	switch (kind) {
+	case AU_EV_MARK:          return "MARK";
+	case AU_EV_FIRST_RTP:     return "FIRST_RTP";
+	case AU_EV_JB_LATE:       return "JB_LATE";
+	case AU_EV_JB_WISH:       return "JB_WISH";
+	case AU_EV_JB_FLUSH:      return "JB_FLUSH";
+	case AU_EV_JB_OVER:       return "JB_OVER";
+	case AU_EV_JB_DROP:       return "JB_DROP";
+	case AU_EV_AB_FIRST_DROP: return "AB_FIRST_DROP";
+	case AU_EV_AB_OVERRUN:    return "AB_OVERRUN";
+	case AU_EV_AB_UNDERRUN:   return "AB_UNDERRUN";
+	case AU_EV_AB_AJB_HIGH:   return "AB_AJB_HIGH";
+	case AU_EV_AB_AJB_LOW:    return "AB_AJB_LOW";
+	case AU_EV_RENDER_FIRST:  return "RENDER_FIRST";
+	case AU_EV_RENDER_GAP:    return "RENDER_GAP";
+	case AU_EV_RENDER_DUP:    return "RENDER_DUP";
+	case AU_EV_RENDER_LATE:   return "RENDER_LATE";
+	case AU_EV_REC_FIRST:     return "REC_FIRST";
+	case AU_EV_REC_OVERFLOW:  return "REC_OVERFLOW";
+	default:                  return "?";
+	}
+}
+EOF
+fi
+# aubuf.c: overrun, AJB_LOW, underrun, first-read drop, AJB_HIGH
+printf '\t\tRE_TRACE_ID_INSTANT("aubuf", "overrun", ab->id);\n\t\tf = list_ledata(ab->afl.head);\n\t\tif (f) {\n' > "$T/a1"
+printf '\t\t\tau_ev_push(AU_EV_AB_OVERRUN, (int32_t)auframe_bytes_to_ms(&f->af, mbuf_get_left(f->mb)), (int32_t)auframe_bytes_to_ms(&f->af, ab->cur_sz)); /* Dialler lab: audio events */\n' > "$T/n1"
+patch_insert "$SRC/rem/aubuf/aubuf.c" 'AU_EV_AB_OVERRUN' "$T/a1" "$T/n1" after
+printf '\tas = ajb_get(ab->ajb, af);\n\tif (as == AJB_LOW) {\n' > "$T/a2"
+printf '\t\tau_ev_push(AU_EV_AB_AJB_LOW, (int32_t)auframe_bytes_to_ms(af, sz), (int32_t)auframe_bytes_to_ms(af, ab->cur_sz));\n' > "$T/n2"
+patch_insert "$SRC/rem/aubuf/aubuf.c" 'AU_EV_AB_AJB_LOW' "$T/a2" "$T/n2" after
+printf '\t\t\t++ab->stats.ur;\n' > "$T/a3"
+printf '\t\t\tau_ev_push(AU_EV_AB_UNDERRUN, (int32_t)auframe_bytes_to_ms(af, ab->wish_sz), (int32_t)auframe_bytes_to_ms(af, ab->cur_sz));\n' > "$T/n3"
+patch_insert "$SRC/rem/aubuf/aubuf.c" 'AU_EV_AB_UNDERRUN' "$T/a3" "$T/n3" after
+printf '\tdrop = ab->live && !ab->started && ab->wish_sz;\n' > "$T/a4"
+printf '\tsize_t au_before = ab->cur_sz; /* Dialler lab: first-read drop size */\n' > "$T/n4"
+patch_insert "$SRC/rem/aubuf/aubuf.c" 'au_before = ab->cur_sz' "$T/a4" "$T/n4" after
+printf '\tab->started = true;\n\tread_auframe(ab, af);\n\tif (as == AJB_HIGH) {\n' > "$T/a5"
+printf '\tif (drop && au_before > ab->cur_sz)\n\t\tau_ev_push(AU_EV_AB_FIRST_DROP, (int32_t)auframe_bytes_to_ms(af, au_before - ab->cur_sz), (int32_t)auframe_bytes_to_ms(af, au_before));\n\tab->started = true;\n\tread_auframe(ab, af);\n\tif (as == AJB_HIGH) {\n\t\tau_ev_push(AU_EV_AB_AJB_HIGH, (int32_t)auframe_bytes_to_ms(af, sz), (int32_t)auframe_bytes_to_ms(af, ab->cur_sz));\n' > "$T/n5"
+patch_insert "$SRC/rem/aubuf/aubuf.c" 'AU_EV_AB_FIRST_DROP' "$T/a5" "$T/n5" replace
+rm -rf "$T"
+echo "   re: lab audio continuity events present (tmr.c, re_tmr.h, aubuf.c)"

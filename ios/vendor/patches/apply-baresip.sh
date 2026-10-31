@@ -86,3 +86,40 @@ echo "   baresip: receive-path PLC/FEC patch present"
 # per lost packet is the buffer's own refill after a loss; any fix needs a
 # timeline-driven concealment (decode on a timer, not on arrival), not a
 # change to the frame count. See ios/vendor/patches/README.md.
+
+# ---- Dialler lab: audio continuity events (lab/audio-continuity) ------------
+# Hooks for the event ring declared in libre's re_tmr.h (apply-re.sh): the
+# jitter buffer's late/over-wish/wish-change/flush/first-packet events and
+# the aureceiver's discard of a decoded frame.
+patch_insert() { # file marker anchor-file new-file mode(after|before|replace)
+  f="$1"; marker="$2"; A="$3"; N="$4"; mode="$5"
+  grep -qF "$marker" "$f" && return 0
+  A="$A" N="$N" MODE="$mode" perl -0pi -e 'BEGIN { local $/; open(my $a, "<", $ENV{A}) or die; $anchor = <$a>; close $a; open(my $n, "<", $ENV{N}) or die; $new = <$n>; close $n; }
+    $rep = $ENV{MODE} eq "after" ? $anchor.$new : $ENV{MODE} eq "before" ? $new.$anchor : $new;
+    $cnt = s/\Q$anchor\E/$rep/; die "anchor not found in $ARGV\n" unless $cnt;' "$f"
+  grep -qF "$marker" "$f" || { echo "patch: $marker not applied to $f"; exit 1; }
+}
+T="$(mktemp -d)"
+printf '\t\t\tSTAT_INC(n_late);\n' > "$T/a1"
+printf '\t\t\tau_ev_push(AU_EV_JB_LATE, (int32_t)seq, (int32_t)jb->seq_get); /* Dialler lab: audio events */\n' > "$T/n1"
+patch_insert "$SRC/src/jbuf.c" 'AU_EV_JB_LATE' "$T/a1" "$T/n1" after
+printf '\tif (wish > jb->wish) {\n\t\tDEBUG_INFO("wish size changed %%u --> %%u\\n", jb->wish, wish);\n\t\tjb->wish = wish;\n' > "$T/a2"
+printf '\tif (wish > jb->wish) {\n\t\tDEBUG_INFO("wish size changed %%u --> %%u\\n", jb->wish, wish);\n\t\tau_ev_push(AU_EV_JB_WISH, (int32_t)jb->wish, (int32_t)wish);\n\t\tjb->wish = wish;\n' > "$T/n2"
+patch_insert "$SRC/src/jbuf.c" 'au_ev_push(AU_EV_JB_WISH, (int32_t)jb->wish, (int32_t)wish)' "$T/a2" "$T/n2" replace
+printf '\t\t--jb->wish;\n' > "$T/a3"
+printf '\t\tau_ev_push(AU_EV_JB_WISH, (int32_t)jb->wish, (int32_t)jb->wish - 1);\n' > "$T/n3"
+patch_insert "$SRC/src/jbuf.c" 'AU_EV_JB_WISH, (int32_t)jb->wish, (int32_t)jb->wish - 1' "$T/a3" "$T/n3" before
+printf '\t\t\t   jb->nf, jb->min, jb->wish, jb->max);\n\t\terr = EAGAIN;\n' > "$T/a4"
+printf '\t\t\t   jb->nf, jb->min, jb->wish, jb->max);\n\t\tau_ev_push(AU_EV_JB_OVER, (int32_t)jb->nf, (int32_t)jb->wish);\n\t\terr = EAGAIN;\n' > "$T/n4"
+patch_insert "$SRC/src/jbuf.c" 'AU_EV_JB_OVER' "$T/a4" "$T/n4" replace
+printf 'success:\n\t/* Update last sequence */\n\tjb->running = true;\n' > "$T/a5"
+printf 'success:\n\tif (!jb->running)\n\t\tau_ev_push(AU_EV_FIRST_RTP, (int32_t)seq, 0);\n\t/* Update last sequence */\n\tjb->running = true;\n' > "$T/n5"
+patch_insert "$SRC/src/jbuf.c" 'AU_EV_FIRST_RTP' "$T/a5" "$T/n5" replace
+printf '\tif (jb->packetl.head) {\n\t\tDEBUG_INFO("flush: %%u frames\\n", jb->n);\n\t}\n' > "$T/a6"
+printf '\tif (jb->packetl.head)\n\t\tau_ev_push(AU_EV_JB_FLUSH, (int32_t)jb->n, 0);\n' > "$T/n6"
+patch_insert "$SRC/src/jbuf.c" 'AU_EV_JB_FLUSH' "$T/a6" "$T/n6" after
+printf '\tif (drop) {\n\t\taubuf_drop_auframe(ar->aubuf, &af);\n' > "$T/a7"
+printf '\t\tau_ev_push(AU_EV_JB_DROP, (int32_t)auframe_bytes_to_ms(&af, auframe_size(&af)), 0); /* Dialler lab: audio events */\n' > "$T/n7"
+patch_insert "$SRC/src/aureceiver.c" 'AU_EV_JB_DROP' "$T/a7" "$T/n7" after
+rm -rf "$T"
+echo "   baresip: lab audio continuity hooks present (jbuf.c, aureceiver.c)"

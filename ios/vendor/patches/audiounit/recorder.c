@@ -32,6 +32,7 @@ struct ausrc_st {
 	ausrc_read_h *rh;
 	struct conv_buf *buf;
 	void *arg;
+	uint64_t cb_count;       /* Dialler lab: audio continuity events */
 };
 
 
@@ -97,8 +98,13 @@ static OSStatus input_callback(void *inRefCon,
 
 	ret = init_data_write(st->buf, &abl_in.mBuffers[0].mData,
 			      framesz, inNumberFrames);
-	if (ret != noErr)
+	if (ret != noErr) {
+		/* Dialler lab: a full input ring loses this capture silently */
+		au_ev_push(AU_EV_REC_OVERFLOW, (int32_t)inNumberFrames, 0);
 		return ret;
+	}
+	if (!st->cb_count++)
+		au_ev_push(AU_EV_REC_FIRST, (int32_t)inNumberFrames, (int32_t)st->prm.srate);
 
 	ret = AudioUnitRender(st->au_in,
 			      ioActionFlags,

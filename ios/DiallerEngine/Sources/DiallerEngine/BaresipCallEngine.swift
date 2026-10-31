@@ -346,6 +346,7 @@ public final class BaresipCallEngine: CallEngine {
     public func audioSessionActivated() {
         guard stackRunning else { return }
         lock.withLock { sessionActive = true }
+        cb_audio_mark(1) // lab: didActivate on the audio timeline
         cb_audio_interrupt(false)
         log("engine: audio session active → audio released (units start)")
         verifyAudioFlow()
@@ -396,6 +397,7 @@ public final class BaresipCallEngine: CallEngine {
         var p0: UInt64 = 0, r0: UInt64 = 0, e0: UInt64 = 0
         cb_audio_stats(&p0, &r0, &e0)
         var lastRx: UInt32 = 0 // RTP received as of the previous window
+        var eventsSeen = 0 // lab: audio continuity events reported so far
         // Windows at 2 s and 5 s, then every 5 s for the life of the call
         // (capped), so a call that degrades at 30 s is visible; each window
         // reports the audio it rendered since the previous one.
@@ -432,7 +434,12 @@ public final class BaresipCallEngine: CallEngine {
                     self.audioVerdicts.append(v)
                     if self.audioVerdicts.count > 60 { self.audioVerdicts.removeFirst() }
                 }
-                self.log("engine: \(verdict) — \(Int(delay))s: play=\(play) rec=\(rec) frames, energy/frame=\(energy / max(play, 1)); rtp tx=\(m.tx_packets) rx=\(m.rx_packets) err=\(m.rx_errors) lost=\(m.rx_lost) jitter=\(m.rx_jitter_us / 1000)ms; jbuf late=\(m.jb_late) lost=\(m.jb_lost) underflow=\(m.jb_underflow) overflow=\(m.jb_overflow)")
+                // Lab: what removed or padded audio in this window, by kind.
+                let events = Self.audioEvents()
+                let fresh = events.count > eventsSeen ? Array(events[eventsSeen...]) : []
+                eventsSeen = events.count
+                let windowEvents = AudioContinuity.summary(of: fresh).kinds
+                self.log("engine: \(verdict) — \(Int(delay))s: play=\(play) rec=\(rec) frames, energy/frame=\(energy / max(play, 1)); rtp tx=\(m.tx_packets) rx=\(m.rx_packets) err=\(m.rx_errors) lost=\(m.rx_lost) jitter=\(m.rx_jitter_us / 1000)ms; jbuf late=\(m.jb_late) lost=\(m.jb_lost) underflow=\(m.jb_underflow) overflow=\(m.jb_overflow); events +\(fresh.count)\(windowEvents.isEmpty ? "" : " " + windowEvents)")
             }
         }
     }
@@ -701,11 +708,13 @@ public final class BaresipCallEngine: CallEngine {
                 return (sessionActive, out)
             }
             refreshState()
+            cb_audio_mark(2) // lab: established on the audio timeline
             log("engine: call \(callID) established with \(peer); audio \(active ? "starting (session already active)" : "held until didActivate")")
             if active { verifyAudioFlow() }
             if wasOutgoing { onCallEstablished?(callID) }
         case CB_EVENT_CALL_CLOSED:
             log("engine: call \(callID) closed (\(Self.closeReason(text)))\(status == 0 ? "" : " [\(status)]")")
+            logAudioContinuity(callID)
             let last: Bool = lock.withLock {
                 calls[callID] = nil
                 if calls.isEmpty { flowCheckScheduled = false; flowCheckGeneration += 1 }
@@ -722,6 +731,105 @@ public final class BaresipCallEngine: CallEngine {
             }
         default:
             if !text.isEmpty { log("engine event: \(text)") }
+        }
+    }
+}
+
+// MARK: - Lab: audio continuity (lab/audio-continuity)
+//
+// Every event that removed or padded audio on the play path, from the
+// vendored aubuf/jbuf/audiounit hooks (see cbaresip.h cb_audio_events),
+// summarised per call and dumped in full at call end so a device log can be
+// read against the server's relay line for the same call.
+
+public struct AudioEvent: Sendable {
+    public let tMs: Double
+    public let kind: UInt32
+    public let name: String
+    public let a: Int32
+    public let b: Int32
+}
+
+public struct AudioContinuity: Sendable {
+    public var removedMs: Int = 0
+    public var firstReadMs: Int = 0
+    public var jbufDropMs: Int = 0
+    public var ajbSkipMs: Int = 0
+    public var overrunMs: Int = 0
+    public var insertedMs: Int = 0
+    public var underruns: Int = 0
+    public var jbLate: Int = 0
+    public var wishMin: Int32 = 0
+    public var wishMax: Int32 = 0
+    public var firstRemovedAtMs: Double = -1
+    public var events: [AudioEvent] = []
+
+    /// Counts by kind, "JB_DROP=3 AB_UNDERRUN=1", in the order first seen.
+    public var kinds: String {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for e in events where e.name != "MARK" {
+            if counts[e.name] == nil { order.append(e.name) }
+            counts[e.name, default: 0] += 1
+        }
+        return order.map { "\($0)=\(counts[$0]!)" }.joined(separator: " ")
+    }
+
+    public var line: String {
+        "removed_ms=\(removedMs) first_read_ms=\(firstReadMs) jbuf_drop_ms=\(jbufDropMs) ajb_skip_ms=\(ajbSkipMs) overrun_ms=\(overrunMs) inserted_ms=\(insertedMs) underruns=\(underruns) jb_late=\(jbLate) wish=\(wishMin)-\(wishMax) events=\(events.count) first_removed_at_ms=\(firstRemovedAtMs < 0 ? "none" : String(Int(firstRemovedAtMs)))"
+    }
+
+    public static func summary(of events: [AudioEvent]) -> AudioContinuity {
+        var c = AudioContinuity(events: events)
+        func removed(_ ms: Int32, at t: Double) {
+            c.removedMs += Int(ms)
+            if c.firstRemovedAtMs < 0 { c.firstRemovedAtMs = t }
+        }
+        for e in events {
+            switch e.name {
+            case "AB_FIRST_DROP": c.firstReadMs += Int(e.a); removed(e.a, at: e.tMs)
+            case "JB_DROP": c.jbufDropMs += Int(e.a); removed(e.a, at: e.tMs)
+            case "AB_AJB_HIGH": c.ajbSkipMs += Int(e.a); removed(e.a, at: e.tMs)
+            case "AB_OVERRUN": c.overrunMs += Int(e.a); removed(e.a, at: e.tMs)
+            case "AB_UNDERRUN": c.underruns += 1; c.insertedMs += Int(e.a)
+            case "JB_LATE": c.jbLate += 1
+            case "JB_WISH":
+                for w in [e.a, e.b] {
+                    if c.wishMin == 0 || w < c.wishMin { c.wishMin = w }
+                    if w > c.wishMax { c.wishMax = w }
+                }
+            default: break
+            }
+        }
+        return c
+    }
+}
+
+extension BaresipCallEngine {
+    /// All events of the current call's audio timeline (since dial/incoming).
+    static func audioEvents() -> [AudioEvent] {
+        let n = cb_audio_event_count()
+        guard n > 0 else { return [] }
+        var raw = [cb_audio_event_t](repeating: cb_audio_event_t(), count: n)
+        let got = raw.withUnsafeMutableBufferPointer { cb_audio_events($0.baseAddress, n) }
+        return raw.prefix(got).map { e in
+            AudioEvent(tMs: Double(e.t_us) / 1000, kind: e.kind, name: String(cString: cb_audio_event_name(e.kind)), a: e.a, b: e.b)
+        }
+    }
+
+    /// The last call's continuity summary, for headless tests (sim-call).
+    public static var lastAudioContinuity: AudioContinuity? {
+        continuityLock.withLock { continuityLast }
+    }
+    private static let continuityLock = NSLock()
+    nonisolated(unsafe) private static var continuityLast: AudioContinuity?
+
+    func logAudioContinuity(_ callID: String) {
+        let c = AudioContinuity.summary(of: Self.audioEvents())
+        Self.continuityLock.withLock { Self.continuityLast = c }
+        log("engine: audio continuity call=\(callID): \(c.line)")
+        for e in c.events {
+            log("engine: audio event +\(String(format: "%.3f", e.tMs / 1000))s \(e.name) a=\(e.a) b=\(e.b)")
         }
     }
 }

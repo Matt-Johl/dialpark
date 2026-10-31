@@ -247,6 +247,7 @@ static void event_handler(enum ua_event ev, struct bevent *event, void *arg)
     case UA_EVENT_CALL_INCOMING:
         /* text = the caller's From display name (may be empty), not the
          * event text: the app names the call from it (directory first). */
+        au_ev_reset(); /* lab: the audio timeline starts with the call */
         emit_call(CB_EVENT_CALL_INCOMING, call, call ? call_peername(call) : "");
         break;
     case UA_EVENT_CALL_OUTGOING:
@@ -345,6 +346,7 @@ static int do_op(struct op *op)
             err = ENOENT;
             break;
         }
+        au_ev_reset(); /* lab: the audio timeline starts with the call */
         err = ua_connect(g.ua, &call, NULL, op->aor, VIDMODE_OFF);
         if (!err && call && op->out && op->outlen)
             str_ncpy(op->out, call_id(call), op->outlen);
@@ -1083,6 +1085,17 @@ void cb_media_stats(const char *call_id, cb_media_stats_t *out)
         memset(&media_stats, 0, sizeof(media_stats));
     *out = media_stats;
 }
+
+/* Lab: the audio continuity event ring lives in libre (re_tmr.h); these
+ * are thin wrappers, safe from any thread. */
+void cb_audio_events_reset(void) { au_ev_reset(); }
+size_t cb_audio_event_count(void) { return au_ev_count(); }
+size_t cb_audio_events(cb_audio_event_t *out, size_t max)
+{
+    return au_ev_read((struct au_ev *)out, max);
+}
+const char *cb_audio_event_name(uint32_t kind) { return au_ev_name(kind); }
+void cb_audio_mark(int32_t what) { au_ev_push(AU_EV_MARK, what, 0); }
 
 int cb_audio_test_alloc(void)
 {

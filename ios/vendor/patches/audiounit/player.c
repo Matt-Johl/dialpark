@@ -25,6 +25,10 @@ struct auplay_st {
 	uint32_t sampsz;
 	auplay_write_h *wh;
 	void *arg;
+	/* Dialler lab: audio continuity events (render timeline) */
+	uint64_t cb_count;
+	double last_end;        /* mSampleTime where the previous buffer ended */
+	uint64_t last_cb_us;
 };
 
 
@@ -72,6 +76,30 @@ static OSStatus output_callback(void *inRefCon,
 
 	if (!wh)
 		return 0;
+
+	/* Dialler lab: the render timeline as CoreAudio drives it. A jump in
+	 * mSampleTime is audio the output skipped or repeated; a late callback
+	 * is the unit starved by the system. */
+	{
+		uint64_t now = tmr_jiffies_usec();
+		double t = inTimeStamp->mSampleTime;
+		if (!st->cb_count) {
+			au_ev_push(AU_EV_RENDER_FIRST, (int32_t)inNumberFrames, (int32_t)st->prm.srate);
+		}
+		else {
+			uint64_t nominal = (uint64_t)inNumberFrames * 1000000 / (st->prm.srate ? st->prm.srate : 48000);
+			uint64_t dt = now - st->last_cb_us;
+			if (t > st->last_end + 0.5)
+				au_ev_push(AU_EV_RENDER_GAP, (int32_t)(t - st->last_end), (int32_t)inNumberFrames);
+			else if (t < st->last_end - 0.5)
+				au_ev_push(AU_EV_RENDER_DUP, (int32_t)(st->last_end - t), (int32_t)inNumberFrames);
+			if (dt > nominal * 2)
+				au_ev_push(AU_EV_RENDER_LATE, (int32_t)(dt / 1000), (int32_t)(nominal / 1000));
+		}
+		st->last_end = t + inNumberFrames;
+		st->last_cb_us = now;
+		st->cb_count++;
+	}
 
 	audiosess_count(true, inNumberFrames);
 

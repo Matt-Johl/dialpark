@@ -175,6 +175,26 @@ typedef struct {
 } cb_media_stats_t;
 void cb_media_stats(const char *call_id, cb_media_stats_t *out);
 
+/// Lab (lab/audio-continuity): every event that removed or padded audio on
+/// the play path since the last reset — the vendored aubuf/jbuf/audiounit
+/// hooks (ios/vendor/patches/apply-re.sh, apply-baresip.sh). t_us counts
+/// from the reset, which the shim does when a call is dialled or arrives.
+/// kind is `enum au_ev_kind` in libre's re_tmr.h; name it with
+/// cb_audio_event_name. Thread-safe, no loop hop.
+typedef struct {
+    uint64_t t_us;
+    uint32_t kind;
+    int32_t a;
+    int32_t b;
+} cb_audio_event_t;
+void cb_audio_events_reset(void);
+size_t cb_audio_event_count(void);
+size_t cb_audio_events(cb_audio_event_t *out, size_t max);
+const char *cb_audio_event_name(uint32_t kind);
+/// A mark from the host in the same timeline: 1 = CallKit didActivate,
+/// 2 = call established.
+void cb_audio_mark(int32_t what);
+
 /// Test hooks (audio-probe): allocate / free a player + source through
 /// baresip's device layer without a SIP call, so the driver's start/hold
 /// behaviour can be asserted directly. 48 kHz mono 20 ms S16LE.
