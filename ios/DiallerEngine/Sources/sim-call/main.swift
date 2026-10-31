@@ -555,6 +555,9 @@ for index in 1...callsWanted {
     }
     if let r = holdResult, r.hasPrefix("FAIL") { fatal = r }
     lock.lock(); let established = inCall; lock.unlock()
+    if let c = BaresipCallEngine.lastAudioContinuity {
+        out("call \(index) continuity: \(c.line)\(c.kinds.isEmpty ? "" : " [" + c.kinds + "]")")
+    }
     let verdicts = engine.audioVerdicts
     for v in verdicts {
         out("call \(index) verdict @\(v.seconds)s: \(v.verdict) play=\(v.playFrames) rec=\(v.recFrames) energy/frame=\(v.playEnergy / max(v.playFrames, 1)) rtp tx=\(v.rtpTx) rx=\(v.rtpRx) lost=\(v.rxLost) jitter=\(v.jitterMs)ms jbuf late=\(v.jbLate) underflow=\(v.jbUnderflow)")
