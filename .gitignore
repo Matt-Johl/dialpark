@@ -37,3 +37,4 @@ vendor.key
 
 # compiled Python from the harness helpers
 __pycache__/
+harness/baresip/media/continuity-*.log

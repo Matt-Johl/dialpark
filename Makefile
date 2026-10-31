@@ -257,6 +257,13 @@ harness-echo:
 	sh harness/echo_test.sh
 	TRUNK=1 sh harness/echo_test.sh
 
+# Audio continuity bench (lab): a click train through an app-to-app call
+# shows audio the receiving phone removed or padded, per scenario (clean,
+# a burst at call start, mid-call stalls, a quiet minute). Numbers only, no
+# bound.   SCENARIO=control|burst|stall|quiet|all (default all)
+harness-continuity:
+	sh harness/continuity_test.sh
+
 # Ring the iOS app (simulator or device, connected as dev-a) through the server.
 harness-ring-sim:
 	sh harness/ring_sim.sh
