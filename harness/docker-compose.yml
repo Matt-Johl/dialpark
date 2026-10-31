@@ -80,6 +80,10 @@ services:
       # the one shared socket; the lines-mode scripts set 5070-5077 (with
       # -trunk-addr :5070, its first port; 5060-5067 would take in 5061).
       - -pbx-line-ports=${DIALPARK_PBX_LINE_PORTS:-}
+      # Lab only (lab/audio-continuity): reproduce the start-of-call RTP
+      # backlog a slow ACK makes; 0s in every real run.
+      - -lab-pump-delay=${DIALPARK_LAB_PUMP_DELAY:-0s}
+      - -rtp-trace=${DIALPARK_RTP_TRACE:-}
       # Off here on purpose: Docker Desktop's UDP port proxy rewrites a LAN
       # phone's RTP source, and replies to that rewritten source are not
       # delivered, so learning the source (symmetric RTP) silences the phone

@@ -91,6 +91,7 @@ func main() {
 		pbxExpiry    = flag.Duration("pbx-register-expiry", time.Hour, "registration lifetime asked for in -pbx-mode=lines; the refresh follows what the PBX grants, not this")
 		pbxDefLine   = flag.String("pbx-default-line", "", "the user whose line identifies a call to the PBX that has no line of its own (a transfer target dialled for a party that is itself on the PBX). Empty refuses such a call rather than sending it under someone else's number")
 		pbxLinePorts = flag.String("pbx-line-ports", "", "in -pbx-mode=lines, a UDP port range (first-last, e.g. 5062-5099) with one PBX-leg socket per port and one line per socket: each line registers from, is called on and calls out of its own port. An exchange binds a third-party SIP device to the address and port it registers from, so lines sharing one socket cannot all be registered at once (CUCM). The first port is the trunk listener; -trunk-addr may name it or be left out. Empty: every line shares the one trunk socket")
+		labPumpDelay = flag.Duration("lab-pump-delay", 0, "LAB ONLY: hold the relay back this long after the caller's ACK so the callee's RTP queues and drains as a start-of-call burst (0 = off)")
 		rtpTrace     = flag.String("rtp-trace", "", "lab only: directory for a per-packet TSV of every relayed RTP stream (<call id>-<from>-<to>.tsv; t_us seq ts len skew_ms marker); empty = off")
 		diagRetain   = flag.Duration("diag-retain", 30*24*time.Hour, "how long a device's uploaded diagnostics are kept under <data-dir>/diag; 0 keeps them forever")
 		showVersion  = flag.Bool("version", false, "print the build version and exit")
@@ -186,6 +187,7 @@ func main() {
 		pbxDefaultLine:        *pbxDefLine,
 		pbxLinePorts:          linePorts,
 		rtpTraceDir:           *rtpTrace,
+		labPumpDelay:          *labPumpDelay,
 	}); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
@@ -261,6 +263,7 @@ type options struct {
 	pbxLines       bool
 	pbxRegistrar   string
 	rtpTraceDir    string
+	labPumpDelay   time.Duration
 	pbxDomain      string
 	pbxPeers       []string
 	pbxExpiry      time.Duration
@@ -486,6 +489,7 @@ func run(ctx context.Context, log *slog.Logger, o options) error {
 		DefaultLine:           o.pbxDefaultLine,
 		LinePorts:             o.pbxLinePorts,
 		RTPTraceDir:           o.rtpTraceDir,
+		LabPumpDelay:          o.labPumpDelay,
 		RingTimeout:           o.ringTimeout,
 		Auth:                  sipauth.New(o.localDomain, devices),
 		Logger:                log,

@@ -170,6 +170,12 @@ type Config struct {
 	// PBXDomain is the host part of the address of record in lines mode
 	// (From towards the PBX). Empty = the trunk peer's host.
 	PBXDomain string
+	// LabPumpDelay (lab/audio-continuity only) holds the relay back for
+	// this long after the caller's ACK before the pumps start, so the
+	// callee's RTP queues in the socket and drains as a burst — the
+	// start-of-call backlog a slow ACK produces in production (227–276 ms
+	// on app→CUCM calls), reproduced on demand. Zero in every real build.
+	LabPumpDelay time.Duration
 	// LinePorts gives each line its own PBX-leg socket (lines mode only;
 	// see PortRange). The trunk listener binds the range's first port and
 	// every other port gets a listener of its own; a line then registers
@@ -1829,6 +1835,10 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 			}
 			legA.codec, legB.codec = got, got
 		}
+	}
+	if s.cfg.LabPumpDelay > 0 {
+		log.Warn("lab: holding the pumps back after the ACK", "delay", s.cfg.LabPumpDelay)
+		time.Sleep(s.cfg.LabPumpDelay)
 	}
 	log.Info("bridged", "dst", dst.String(), "codec", legA.codec.Name, "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
 

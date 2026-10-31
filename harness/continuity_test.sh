@@ -126,6 +126,11 @@ scenario() {
   if [ "$STACK_UP" = 1 ]; then $COMPOSE down -v >/dev/null 2>&1 || true; fi
   STACK_UP=1
   MARK="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # backlog: the server itself holds the pumps back 300 ms after the ACK
+  # (-lab-pump-delay), so 212's first packets queue in the server's socket
+  # and drain as one burst the moment the relay starts — the start-of-call
+  # backlog a slow ACK makes on app→CUCM calls, by the same mechanism.
+  if [ "$name" = backlog ]; then export DIALPARK_LAB_PUMP_DELAY=300ms; else export DIALPARK_LAB_PUMP_DELAY=0s; fi
   $COMPOSE up --build -d dialpark >/dev/null 2>&1
   sleep 2
   sh harness/innet.sh "$NET" harness/provision.sh >/dev/null
@@ -194,12 +199,13 @@ scenario() {
 rc=0
 case "$SCENARIO" in
   control) scenario control 30 || rc=1 ;;
+  backlog) scenario backlog 30 || rc=1 ;;
   burst)   scenario burst 30 || rc=1 ;;
   stall)   scenario stall 30 || rc=1 ;;
   quiet)   scenario quiet 60 || rc=1 ;;
   all)
-    for s in control burst stall; do scenario "$s" 30 || rc=1; done
+    for s in control backlog burst stall; do scenario "$s" 30 || rc=1; done
     scenario quiet 60 || rc=1 ;;
-  *) echo "unknown SCENARIO=$SCENARIO (control|burst|stall|quiet|all)"; exit 2 ;;
+  *) echo "unknown SCENARIO=$SCENARIO (control|backlog|burst|stall|quiet|all)"; exit 2 ;;
 esac
 exit $rc
