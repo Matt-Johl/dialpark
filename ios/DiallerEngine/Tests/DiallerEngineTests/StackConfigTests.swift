@@ -19,9 +19,11 @@ final class StackConfigTests: XCTestCase {
     func testAudioProfile() {
         let c = BaresipCallEngine.stackConfig(acceptAnyCertificate: true, audioSource: nil)
         let expected: [String: String] = [
-            "audio_jitter_buffer_type": "adaptive",
-            "audio_jitter_buffer_delay": "2-8",
-            "audio_buffer": "40-160",
+            // Lab (lab/audio-continuity): baresip's jitter buffer is off and
+            // the playout engine (ios/vendor/patches/playout) manages delay
+            // between 20 and 400 ms; audio_buffer is what it is sized from.
+            "audio_jitter_buffer_type": "off",
+            "audio_buffer": "20-400",
             "audio_buffer_mode": "adaptive",
             "opus_application": "voip",
             "opus_inbandfec": "yes",

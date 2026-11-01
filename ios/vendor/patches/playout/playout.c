@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ struct playout {
 	struct playout_cfg cfg;
 	playout_event_h *evh;
 	void *evarg;
+	pthread_mutex_t lock;        /* the RTP thread writes, the audio thread reads */
 
 	/* timeline: sample index 0 is the first packet's first sample */
 	int16_t *ring;
@@ -86,6 +88,7 @@ struct playout *playout_alloc(const struct playout_cfg *cfg)
 	if (!p)
 		return NULL;
 	p->cfg = *cfg;
+	pthread_mutex_init(&p->lock, NULL);
 	/* the ring holds the target ceiling plus a second of slack for bursts */
 	p->cap = ms_to_samp(p, cfg->max_delay_ms + 1000);
 	p->ring = calloc(p->cap, sizeof(int16_t));
@@ -107,6 +110,7 @@ void playout_free(struct playout *p)
 {
 	if (!p)
 		return;
+	pthread_mutex_destroy(&p->lock);
 	free(p->ring);
 	free(p->valid);
 	free(p->hist);
@@ -121,10 +125,18 @@ void playout_set_event_handler(struct playout *p, playout_event_h *h, void *arg)
 	p->evarg = arg;
 }
 
+static void flush_locked(struct playout *p);
 void playout_flush(struct playout *p)
 {
 	if (!p)
 		return;
+	pthread_mutex_lock(&p->lock);
+	flush_locked(p);
+	pthread_mutex_unlock(&p->lock);
+}
+
+static void flush_locked(struct playout *p)
+{
 	memset(p->valid, 0, p->cap);
 	p->started = false;
 	p->read_pos = p->write_high = 0;
@@ -195,12 +207,22 @@ static void delay_update(struct playout *p, int64_t idx, uint64_t now_us)
 
 /* ---- write ------------------------------------------------------------------ */
 
+static int write_locked(struct playout *p, const int16_t *pcm, size_t sampc, uint32_t ts, uint64_t now_us);
 int playout_write(struct playout *p, const int16_t *pcm, size_t sampc, uint32_t ts, uint64_t now_us)
+{
+	int err;
+	if (!p || !pcm || !sampc)
+		return EINVAL;
+	pthread_mutex_lock(&p->lock);
+	err = write_locked(p, pcm, sampc, ts, now_us);
+	pthread_mutex_unlock(&p->lock);
+	return err;
+}
+
+static int write_locked(struct playout *p, const int16_t *pcm, size_t sampc, uint32_t ts, uint64_t now_us)
 {
 	int64_t idx, end, i;
 
-	if (!p || !pcm || !sampc)
-		return EINVAL;
 	if (!p->started) {
 		p->started = true;
 		p->base_ts = ts;
@@ -550,14 +572,22 @@ static void merge(struct playout *p, int16_t *out, size_t n)
 
 /* ---- read ------------------------------------------------------------------ */
 
+static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t now_us);
 void playout_read(struct playout *p, int16_t *out, size_t sampc, uint64_t now_us)
+{
+	if (!p || !out || !sampc)
+		return;
+	pthread_mutex_lock(&p->lock);
+	read_locked(p, out, sampc, now_us);
+	pthread_mutex_unlock(&p->lock);
+}
+
+static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t now_us)
 {
 	size_t avail, done = 0, hole;
 	int64_t level, after;
 	uint32_t level_ms;
 
-	if (!p || !out || !sampc)
-		return;
 	if (!p->started) {
 		memset(out, 0, sampc * sizeof(int16_t));
 		p->st.zero_ms += samp_to_ms(p, (int64_t)sampc);
@@ -668,7 +698,9 @@ void playout_stats(const struct playout *p, struct playout_stats *st)
 {
 	if (!p || !st)
 		return;
+	pthread_mutex_lock((pthread_mutex_t *)&p->lock);
 	*st = p->st;
 	st->level_ms = samp_to_ms(p, p->write_high - p->read_pos);
 	st->target_ms = p->target_ms;
+	pthread_mutex_unlock((pthread_mutex_t *)&p->lock);
 }

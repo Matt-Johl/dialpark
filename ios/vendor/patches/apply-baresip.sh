@@ -123,3 +123,164 @@ printf '\t\tau_ev_push(AU_EV_JB_DROP, (int32_t)auframe_bytes_to_ms(&af, auframe_
 patch_insert "$SRC/src/aureceiver.c" 'AU_EV_JB_DROP' "$T/a7" "$T/n7" after
 rm -rf "$T"
 echo "   baresip: lab audio continuity hooks present (jbuf.c, aureceiver.c)"
+
+# ---- Dialler lab: the playout engine replaces aubuf on the receive path --
+# (lab/audio-continuity; see ios/vendor/patches/playout/README.md for the
+# design and the exact hunks to carry to the production branch.)
+#
+#   aureceiver.c  decoded frames go to playout_write with their RTP
+#                 timestamp in samples and their arrival time; the player's
+#                 read handler pulls from playout_read; SSRC change and
+#                 aurecv_flush flush it; its events reach the continuity
+#                 ring. aubuf stays allocated but unused (zero-risk removal
+#                 later).
+#   rtprecv.c     with the jitter buffer off, the lost-packet count that
+#                 drives the codec's PLC/FEC was passed as 0; it is now
+#                 computed the same way as with a jitter buffer.
+#   CMakeLists    src/playout.c joins the build (the file itself is copied
+#                 by build-baresip.sh apply_patches).
+T="$(mktemp -d)"
+printf '#include "core.h"\n' > "$T/a1"
+printf '#include "playout.h" /* Dialler lab: playout engine */\n' > "$T/n1"
+patch_insert "$SRC/src/aureceiver.c" 'Dialler lab: playout engine' "$T/a1" "$T/n1" after
+printf '\tstruct aubuf *aubuf;          /**< Audio buffer before auplay        */\n' > "$T/a2"
+printf '\tstruct playout *po;           /**< Dialler lab: adaptive playout      */\n' > "$T/n2"
+patch_insert "$SRC/src/aureceiver.c" 'struct playout *po;' "$T/a2" "$T/n2" after
+printf '\tmem_deref(ar->aubuf);\n' > "$T/a3"
+printf '\tplayout_free(ar->po); /* Dialler lab */\n' > "$T/n3"
+patch_insert "$SRC/src/aureceiver.c" 'playout_free(ar->po);' "$T/a3" "$T/n3" before
+# the event bridge, before the aubuf allocator
+printf 'static int aurecv_alloc_aubuf(struct audio_recv *ar, const struct auframe *af)\n' > "$T/a4"
+cat > "$T/n4" <<'EOF'
+/* Dialler lab: the playout engine's events on the continuity ring */
+static void aurecv_po_event(const char *kind, int32_t a, int32_t b, void *arg)
+{
+	uint32_t k = AU_EV_NONE;
+	(void)arg;
+	if (!strcmp(kind, "accelerate")) k = AU_EV_PO_ACCEL;
+	else if (!strcmp(kind, "preemptive")) k = AU_EV_PO_PREEMPT;
+	else if (!strcmp(kind, "expand")) k = AU_EV_PO_EXPAND;
+	else if (!strcmp(kind, "zeros")) k = AU_EV_PO_ZEROS;
+	else if (!strcmp(kind, "merge")) k = AU_EV_PO_MERGE;
+	else if (!strcmp(kind, "late")) k = AU_EV_PO_LATE;
+	else if (!strcmp(kind, "target")) k = AU_EV_PO_TARGET;
+	else if (!strcmp(kind, "flush")) k = AU_EV_PO_FLUSH;
+	else if (!strcmp(kind, "overflow")) k = AU_EV_PO_OVERFLOW;
+	if (k != AU_EV_NONE)
+		au_ev_push(k, a, b);
+}
+
+
+EOF
+patch_insert "$SRC/src/aureceiver.c" 'aurecv_po_event' "$T/a4" "$T/n4" before
+# push: allocate the engine on the first frame, write frames to it
+cat > "$T/a5" <<'EOF'
+	if (!ar->aubuf) {
+		err = aurecv_alloc_aubuf(ar, af);
+		if (err)
+			return err;
+	}
+EOF
+cat > "$T/n5" <<'EOF'
+	if (!ar->aubuf) {
+		err = aurecv_alloc_aubuf(ar, af);
+		if (err)
+			return err;
+	}
+	/* Dialler lab: the playout engine, sized from the config's audio
+	 * buffer range, at the frame's (post-filter) rate */
+	if (!ar->po) {
+		struct playout_cfg pc;
+		pc.srate = af->srate;
+		pc.min_delay_ms = (uint32_t)ar->cfg->buffer.min;
+		pc.max_delay_ms = (uint32_t)ar->cfg->buffer.max;
+		pc.ptime_ms = (uint32_t)(ar->ptime / 1000);
+		if (pc.ptime_ms == 0)
+			pc.ptime_ms = 20;
+		mtx_lock(ar->aubuf_mtx);
+		ar->po = playout_alloc(&pc);
+		if (ar->po)
+			playout_set_event_handler(ar->po, aurecv_po_event, ar);
+		mtx_unlock(ar->aubuf_mtx);
+		if (!ar->po)
+			return ENOMEM;
+	}
+EOF
+patch_insert "$SRC/src/aureceiver.c" 'ar->po = playout_alloc(&pc);' "$T/a5" "$T/n5" replace
+cat > "$T/a6" <<'EOF'
+	err = aubuf_write_auframe(ar->aubuf, af);
+	if (err)
+		return err;
+EOF
+cat > "$T/n6" <<'EOF'
+	/* Dialler lab: into the playout engine instead of aubuf. Mono S16LE
+	 * is what the app's codecs and auconv produce; anything else is
+	 * refused rather than mis-played. The timestamp is the RTP one in
+	 * samples at this frame's rate (the engine wraps as RTP does). */
+	if (af->fmt != AUFMT_S16LE || af->ch != 1)
+		return EINVAL;
+	err = playout_write(ar->po, af->sampv, af->sampc,
+			    (uint32_t)(af->timestamp * af->srate / AUDIO_TIMEBASE),
+			    tmr_jiffies_usec());
+	if (err == ETIMEDOUT)
+		err = 0; /* a late packet is the engine's statistic, not an error */
+	if (err)
+		return err;
+EOF
+patch_insert "$SRC/src/aureceiver.c" 'into the playout engine instead of aubuf' "$T/a6" "$T/n6" replace
+cat > "$T/a7" <<'EOF'
+	if (bpms)
+		re_atomic_rlx_set(&ar->stats.latency,
+				  aubuf_cur_size(ar->aubuf) / bpms);
+EOF
+cat > "$T/n7" <<'EOF'
+	if (bpms) {
+		struct playout_stats ps; /* Dialler lab */
+		playout_stats(ar->po, &ps);
+		re_atomic_rlx_set(&ar->stats.latency, ps.level_ms);
+	}
+EOF
+patch_insert "$SRC/src/aureceiver.c" 'playout_stats(ar->po, &ps);' "$T/a7" "$T/n7" replace
+printf '\tif (flush)\n\t\taubuf_flush(ar->aubuf);\n' > "$T/a8"
+printf '\tif (flush) {\n\t\taubuf_flush(ar->aubuf);\n\t\tplayout_flush(ar->po); /* Dialler lab */\n\t}\n' > "$T/n8"
+patch_insert "$SRC/src/aureceiver.c" 'playout_flush(ar->po); /* Dialler lab */' "$T/a8" "$T/n8" replace
+cat > "$T/a9" <<'EOF'
+	if (ar->aubuf)
+		aubuf_read_auframe(ar->aubuf, af);
+	else
+		memset(af->sampv, 0, auframe_size(af));
+EOF
+cat > "$T/n9" <<'EOF'
+	/* Dialler lab: the player pulls from the playout engine (its own
+	 * lock; aubuf_mtx above only guards the pointer) */
+	if (ar->po && af->fmt == AUFMT_S16LE && af->ch == 1)
+		playout_read(ar->po, af->sampv, af->sampc, tmr_jiffies_usec());
+	else
+		memset(af->sampv, 0, auframe_size(af));
+EOF
+patch_insert "$SRC/src/aureceiver.c" 'the player pulls from the playout engine' "$T/a9" "$T/n9" replace
+printf 'void aurecv_flush(struct audio_recv *ar)\n{\n' > "$T/a10"
+printf '\tplayout_flush(ar ? ar->po : NULL); /* Dialler lab: aurecv_flush */\n' > "$T/n10"
+patch_insert "$SRC/src/aureceiver.c" 'Dialler lab: aurecv_flush' "$T/a10" "$T/n10" after
+# rtprecv: the loss count with the jitter buffer off
+cat > "$T/a11" <<'EOF'
+	else {
+		(void)handle_rtp(rx, hdr, mb, 0, false);
+	}
+EOF
+cat > "$T/n11" <<'EOF'
+	else {
+		/* Dialler lab: with the jitter buffer off the lost-packet count
+		 * that drives the codec's PLC/FEC was always 0; count it as the
+		 * jitter buffer path does (a reordered packet counts 0) */
+		int lostc = lostcalc(rx, hdr->seq);
+		(void)handle_rtp(rx, hdr, mb, lostc > 0 ? lostc : 0, false);
+	}
+EOF
+patch_insert "$SRC/src/rtprecv.c" 'Dialler lab: with the jitter buffer off' "$T/a11" "$T/n11" replace
+# CMake
+printf '  src/aureceiver.c\n' > "$T/a12"
+printf '  src/playout.c\n' > "$T/n12"
+patch_insert "$SRC/CMakeLists.txt" 'src/playout.c' "$T/a12" "$T/n12" after
+rm -rf "$T"
+echo "   baresip: lab playout engine integration present (aureceiver.c, rtprecv.c, CMakeLists.txt)"

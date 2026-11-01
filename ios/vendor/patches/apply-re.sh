@@ -314,3 +314,15 @@ printf '\tif (drop && au_before > ab->cur_sz)\n\t\tau_ev_push(AU_EV_AB_FIRST_DRO
 patch_insert "$SRC/rem/aubuf/aubuf.c" 'AU_EV_AB_FIRST_DROP' "$T/a5" "$T/n5" replace
 rm -rf "$T"
 echo "   re: lab audio continuity events present (tmr.c, re_tmr.h, aubuf.c)"
+
+# Lab: playout engine event kinds (the engine replaces aubuf on the receive
+# path; its own events are pushed to the same ring).
+if ! grep -q 'AU_EV_PO_ACCEL' "$SRC/include/re_tmr.h"; then
+  perl -0pi -e 's/\tAU_EV_REC_OVERFLOW,  \/\* a=frames lost \(input ring full\) \*\/\n\};/\tAU_EV_REC_OVERFLOW,  \/* a=frames lost (input ring full) *\/\n\tAU_EV_PO_ACCEL,      \/* playout: a=ms removed by time compression, b=level ms *\/\n\tAU_EV_PO_PREEMPT,    \/* playout: a=ms added by time stretching *\/\n\tAU_EV_PO_EXPAND,     \/* playout: a=ms concealed from history, b=level ms *\/\n\tAU_EV_PO_ZEROS,      \/* playout: a=ms of silence (no history) *\/\n\tAU_EV_PO_MERGE,      \/* playout: real audio cross-faded back in *\/\n\tAU_EV_PO_LATE,       \/* playout: a=samples behind the playout position, dropped *\/\n\tAU_EV_PO_TARGET,     \/* playout: a=old b=new target ms *\/\n\tAU_EV_PO_FLUSH,      \/* playout: new stream *\/\n\tAU_EV_PO_OVERFLOW,   \/* playout: a=ms skipped, ring full *\/\n};/' "$SRC/include/re_tmr.h"
+  grep -q 'AU_EV_PO_ACCEL' "$SRC/include/re_tmr.h" || { echo "patch: re_tmr.h playout kinds anchor not found"; exit 1; }
+fi
+if ! grep -q 'AU_EV_PO_ACCEL' "$SRC/src/tmr/tmr.c"; then
+  perl -0pi -e 's/(\tcase AU_EV_REC_OVERFLOW:  return "REC_OVERFLOW";\n)/$1\tcase AU_EV_PO_ACCEL:      return "PO_ACCEL";\n\tcase AU_EV_PO_PREEMPT:    return "PO_PREEMPT";\n\tcase AU_EV_PO_EXPAND:     return "PO_EXPAND";\n\tcase AU_EV_PO_ZEROS:      return "PO_ZEROS";\n\tcase AU_EV_PO_MERGE:      return "PO_MERGE";\n\tcase AU_EV_PO_LATE:       return "PO_LATE";\n\tcase AU_EV_PO_TARGET:     return "PO_TARGET";\n\tcase AU_EV_PO_FLUSH:      return "PO_FLUSH";\n\tcase AU_EV_PO_OVERFLOW:   return "PO_OVERFLOW";\n/' "$SRC/src/tmr/tmr.c"
+  grep -q 'AU_EV_PO_ACCEL' "$SRC/src/tmr/tmr.c" || { echo "patch: tmr.c playout names anchor not found"; exit 1; }
+fi
+echo "   re: lab playout event kinds present"

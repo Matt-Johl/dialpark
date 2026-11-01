@@ -98,6 +98,8 @@ apply_patches() {
     mkdir -p "$SRC/baresip/modules/$m/plc"
     cp "$ROOT/patches/plc/plc.c" "$ROOT/patches/plc/plc.h" "$SRC/baresip/modules/$m/plc/"
   done
+  # Lab: the playout engine (ios/vendor/patches/playout) joins baresip's sources
+  cp "$ROOT/patches/playout/playout.c" "$ROOT/patches/playout/playout.h" "$SRC/baresip/src/"
   sh "$ROOT/patches/apply-baresip.sh" "$SRC/baresip"
   sh "$ROOT/patches/apply-re.sh" "$SRC/re"
 }

@@ -590,9 +590,8 @@ public final class BaresipCallEngine: CallEngine {
         # with a 40 ms floor: after a lost packet the jitter buffer withholds
         # the next one until it has refilled, and one extra frame of play
         # buffer rides that out (measured: no delay cost, fewer gaps).
-        audio_jitter_buffer_type  adaptive
-        audio_jitter_buffer_delay 2-8
-        audio_buffer              40-160
+        audio_jitter_buffer_type  off
+        audio_buffer              20-400
         audio_buffer_mode         adaptive
 
         # Opus for speech on Wi-Fi: voip mode, in-band FEC so a single lost
@@ -761,6 +760,14 @@ public struct AudioContinuity: Sendable {
     public var jbLate: Int = 0
     public var wishMin: Int32 = 0
     public var wishMax: Int32 = 0
+    // Lab playout engine (replaces aubuf): time-scaling and concealment
+    public var poAccelMs: Int = 0      // removed by pitch-synchronous compression (not discarded)
+    public var poStretchMs: Int = 0    // added by stretching
+    public var poConcealMs: Int = 0    // concealed from history (underrun or loss)
+    public var poZeroMs: Int = 0       // silence with nothing to conceal from
+    public var poLate: Int = 0         // packets behind the playout position
+    public var poTargetMin: Int32 = 0
+    public var poTargetMax: Int32 = 0
     public var firstRemovedAtMs: Double = -1
     public var events: [AudioEvent] = []
 
@@ -776,7 +783,7 @@ public struct AudioContinuity: Sendable {
     }
 
     public var line: String {
-        "removed_ms=\(removedMs) first_read_ms=\(firstReadMs) jbuf_drop_ms=\(jbufDropMs) ajb_skip_ms=\(ajbSkipMs) overrun_ms=\(overrunMs) inserted_ms=\(insertedMs) underruns=\(underruns) jb_late=\(jbLate) wish=\(wishMin)-\(wishMax) events=\(events.count) first_removed_at_ms=\(firstRemovedAtMs < 0 ? "none" : String(Int(firstRemovedAtMs)))"
+        "removed_ms=\(removedMs) first_read_ms=\(firstReadMs) jbuf_drop_ms=\(jbufDropMs) ajb_skip_ms=\(ajbSkipMs) overrun_ms=\(overrunMs) inserted_ms=\(insertedMs) underruns=\(underruns) jb_late=\(jbLate) wish=\(wishMin)-\(wishMax) events=\(events.count) first_removed_at_ms=\(firstRemovedAtMs < 0 ? "none" : String(Int(firstRemovedAtMs))) po_accel_ms=\(poAccelMs) po_stretch_ms=\(poStretchMs) po_conceal_ms=\(poConcealMs) po_zero_ms=\(poZeroMs) po_late=\(poLate) po_target=\(poTargetMin)-\(poTargetMax)"
     }
 
     public static func summary(of events: [AudioEvent]) -> AudioContinuity {
@@ -797,6 +804,16 @@ public struct AudioContinuity: Sendable {
                 for w in [e.a, e.b] {
                     if c.wishMin == 0 || w < c.wishMin { c.wishMin = w }
                     if w > c.wishMax { c.wishMax = w }
+                }
+            case "PO_ACCEL": c.poAccelMs += Int(e.a)
+            case "PO_PREEMPT": c.poStretchMs += Int(e.a)
+            case "PO_EXPAND": c.poConcealMs += Int(e.a)
+            case "PO_ZEROS": c.poZeroMs += Int(e.a)
+            case "PO_LATE": c.poLate += 1
+            case "PO_TARGET":
+                for w in [e.a, e.b] {
+                    if c.poTargetMin == 0 || w < c.poTargetMin { c.poTargetMin = w }
+                    if w > c.poTargetMax { c.poTargetMax = w }
                 }
             default: break
             }
