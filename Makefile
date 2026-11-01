@@ -257,6 +257,11 @@ harness-echo:
 	sh harness/echo_test.sh
 	TRUNK=1 sh harness/echo_test.sh
 
+# Lab (lab/audio-continuity): the playout engine's scenario tests, plain C,
+# no device or docker (ios/vendor/patches/playout/test).
+lab-playout-test:
+	cd ios/vendor/patches/playout && mkdir -p "$${TMPDIR:-/tmp}/playout" && cc -O2 -std=c99 -Wall -Wextra -o "$${TMPDIR:-/tmp}/playout/playout_test" test/playout_test.c playout.c -lm && "$${TMPDIR:-/tmp}/playout/playout_test" $(PLAYOUT_ARGS)
+
 # Audio continuity bench (lab): a click train through an app-to-app call
 # shows audio the receiving phone removed or padded, per scenario (clean,
 # a burst at call start, mid-call stalls, a quiet minute). Numbers only, no
