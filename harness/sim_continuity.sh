@@ -22,11 +22,18 @@ set -eu
 cd "$(dirname "$0")/.."
 SCENARIO="${SCENARIO:-all}"
 OUT="${OUT:-harness/baresip/media}"
-run() { # name env...
+run() { # name [TONE_SECONDS=N] env...
   name="$1"; shift
   echo "=== sim scenario $name"
   log="$OUT/sim-continuity-$name.log"
+  # The caller plays harness/baresip/media/in.wav (20 s by default, from
+  # `make tone`); a longer call needs a longer tone, and the default is
+  # put back afterwards so the other gates see the file they expect.
+  secs=20
+  for kv in "$@"; do case "$kv" in TONE_SECONDS=*) secs="${kv#TONE_SECONDS=}";; esac; done
+  [ "$secs" = 20 ] || python3 harness/baresip/media/gen_tone.py --seconds "$secs" harness/baresip/media/in.wav >/dev/null
   env "$@" OUTBOUND=212 sh harness/sim_call.sh > "$log" 2>&1 || echo "   (sim_call.sh exited non-zero; see $log)"
+  [ "$secs" = 20 ] || python3 harness/baresip/media/gen_tone.py harness/baresip/media/in.wav >/dev/null
   grep -E "continuity|audio event|PASS|FAIL" "$log" | sed 's/^/   /' | head -80
   echo "   kept: $log"
 }
@@ -34,8 +41,8 @@ case "$SCENARIO" in
   control)  run control ;;
   backlog)  run backlog DIALPARK_LAB_PUMP_DELAY=300ms ;;
   impaired) run impaired IMPAIR=1 ;;
-  long)     run long CALL_SECONDS=30 ;;                  # clean 30 s: does the wish shrink excise anything?
-  long-impaired) run long-impaired IMPAIR=1 CALL_SECONDS=30 ;;
-  all)      run control; run backlog DIALPARK_LAB_PUMP_DELAY=300ms; run impaired IMPAIR=1; run long CALL_SECONDS=30; run long-impaired IMPAIR=1 CALL_SECONDS=30 ;;
+  long)     run long TONE_SECONDS=40 CALL_SECONDS=30 ;;   # clean 30 s
+  long-impaired) run long-impaired TONE_SECONDS=40 IMPAIR=1 CALL_SECONDS=30 ;;
+  all)      run control; run backlog DIALPARK_LAB_PUMP_DELAY=300ms; run impaired IMPAIR=1; run long TONE_SECONDS=40 CALL_SECONDS=30; run long-impaired TONE_SECONDS=40 IMPAIR=1 CALL_SECONDS=30 ;;
   *) echo "unknown SCENARIO=$SCENARIO (control|backlog|impaired|long|long-impaired|all)"; exit 2 ;;
 esac
