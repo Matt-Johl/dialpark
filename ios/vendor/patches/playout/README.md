@@ -18,7 +18,7 @@ WebRTC's NetEq, which is how the industry handles the same problem:
 | underrun | writes zeros, then refills to 40 ms | conceals by repeating the last pitch period with decay, merges real audio back with a cross-fade, and does not advance the timeline (late audio plays, delay grows, acceleration brings it back) |
 | loss (hole with later audio present) | zeros | concealed and skipped; the codec's own PLC/FEC still runs first (aureceiver's lost-frame patch) |
 | where correction happens | any frame | only a stationary, voiced block (normalised correlation of the two periods ≥ 0.9, NetEq's criterion) or a quiet one; unvoiced and transient speech is played as is and the excess waits for a pause or a vowel |
-| rate of correction | one skip per render buffer, no limit | 10 % of read time in speech, one period at most per operation, 50 ms at least between operations (NetEq's timescale countdown); unlimited in silence or ≥ 200 ms above target |
+| rate of correction | one skip per render buffer, no limit | 10 % of read time in speech, one period at most per operation, 50 ms at least between operations (NetEq's timescale countdown); unlimited in silence; ≥ 200 ms above target the 10 % budget is lifted, the gap stays |
 | target | reorder-driven jitter buffer wish + adaptive play buffer | a high quantile of arrival lateness relative to the fastest recent packet, plus one packet; up at once, down one packet at a time; bumped on an underrun |
 | decision input | raw level | low-pass filtered level (NetEq's BufferLevelFilter), so bunched arrival does not cause accelerate/stretch oscillation |
 

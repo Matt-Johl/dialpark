@@ -85,8 +85,18 @@ is carried as latency until the next pause (unlimited rate in silence).
 Conversational speech is roughly 40 % pauses, so a 300 ms backlog is gone
 within the first exchange; 300 ms of extra one-way delay for a few seconds
 is within G.114's acceptable range. The fast band (≥ 200 ms above target)
-lifts the rate limits but not the correlation gate, as in NetEq's fast
-accelerate.
+lifts only the 10 % budget: the gap and the correlation gate stand (the
+first version lifted the gap too, and the simulator showed 4 ms removed
+every 10 ms read while the target staircased down at +2.2 s).
+
+Measured with the final engine, 2026-11-01 evening:
+
+| | result |
+|---|---|
+| unit scenarios | 30 pass; backlog-30 worst second 77 ms (was 149); backlog-15 64 ms |
+| simulator control, 6 s | 0 removed, 192 ms compressed over 0.34–2.14 s: 4 ms per 53 ms in the tone, full rate only in the tone's silent gaps |
+| simulator backlog 300 ms | 0 removed, 268 ms compressed over 0.66–3.4 s, same pattern, 0 concealed, 0 zeros |
+| bench backlog 300 ms | 120/120 and 119/120 clicks, 194 and 254 ms compressed over 1.0–3.1 s (≤ 56 ms per 250 ms interval); one 15 ms wait at +25 s with 17 ms compressed after it (a harness stall, handled) |
 
 New unit scenarios prove the criterion directly: white noise with pauses
 and a 15-packet backlog comes out sample-exact in every noise segment with

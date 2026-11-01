@@ -25,7 +25,7 @@
 #define UNDERRUN_BUMP_US  500000 /* a target bump per underrun at most this often */
 #define LEVEL_FILTER      0.125  /* per read: ~150 ms time constant at 20 ms reads */
 #define SCALE_RATE        0.10   /* time-scaling budget in speech: 10 % (imperceptible) */
-#define FAST_ABOVE_MS     200    /* this far above target, the budget and the gap are lifted */
+#define FAST_ABOVE_MS     200    /* this far above target, the 10 %% budget is lifted (the gap stays) */
 #define MIN_OP_GAP_MS     50     /* between time-scaling operations in speech (NetEq's timescale countdown) */
 #define CORR_THRESHOLD    0.9    /* speech is time-scaled only when this periodic (NetEq's criterion);
                                   * anything less is played as is and the excess waits for a
@@ -643,8 +643,10 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 	 * capped at one period (a 30 ms cap let three periods go in 60 ms
 	 * after a quiet stretch, heard on the device 2026-11-01) and never two
 	 * operations within MIN_OP_GAP_MS; unlimited in silence (the
-	 * operations check) or when the level is far above the target (a
-	 * gross backlog is brought within FAST_ABOVE_MS first, then gently). */
+	 * operations check); when the level is far above the target the
+	 * budget is lifted but not the gap (one period per 50 ms, as the
+	 * simulator showed 4 ms every 10 ms in that band, 2026-11-01), and the
+	 * correlation gate always stands. */
 	{
 		double read_ms = (double)sampc * 1000 / p->cfg.srate, cap = PITCH_MAX_MS;
 		p->accel_credit += SCALE_RATE * read_ms;
@@ -659,8 +661,8 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 		bool merged = p->expanding;
 		size_t P = 0;
 		if (p->level_f >= p->target_ms + p->cfg.ptime_ms && level_ms >= p->target_ms) {
-			double budget = p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 :
-					p->since_op_ms < MIN_OP_GAP_MS ? 0 : p->accel_credit;
+			double budget = p->since_op_ms < MIN_OP_GAP_MS ? 0 :
+					p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 : p->accel_credit;
 			P = accelerate(p, out, sampc, budget);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;
@@ -672,8 +674,8 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 			}
 		}
 		else if (p->level_f + p->cfg.ptime_ms < p->target_ms && !merged) {
-			double budget = p->level_f < p->cfg.ptime_ms ? -1 :
-					p->since_op_ms < MIN_OP_GAP_MS ? 0 : p->stretch_credit;
+			double budget = p->since_op_ms < MIN_OP_GAP_MS ? 0 :
+					p->level_f < p->cfg.ptime_ms ? -1 : p->stretch_credit;
 			P = preemptive(p, out, sampc, budget);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;

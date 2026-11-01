@@ -303,11 +303,10 @@ static int segment_exact(const struct run *r, const int16_t *src, size_t from, s
 	return 0;
 }
 
-/* The rate rule, read off the event log: outside the fast band (level
- * at least FAST_ABOVE above the target at the time) no time-scaling
- * operation is larger than one period (15 ms) and no two are closer than
- * MIN_OP_GAP (50 ms). For scenarios without silence, where the rule is
- * lifted. Returns the number of violations; prints the first. */
+/* The rate rule, read off the event log: no time-scaling operation is
+ * larger than one period (15 ms) and no two are closer than MIN_OP_GAP
+ * (50 ms), whatever the level. For scenarios without silence, where the
+ * rule is lifted. Returns the number of violations; prints the first. */
 static int judge_rate(const struct run *r)
 {
 	const char *q = r->evlog;
@@ -319,11 +318,9 @@ static int judge_rate(const struct run *r)
 			if (!strcmp(kind, "target"))
 				target = b;
 			else if (!strcmp(kind, "accelerate") || !strcmp(kind, "preemptive")) {
-				if (b < target + 200 - 40) { /* clearly outside the fast band */
-					if (a > 15 || t - last < 50) {
-						if (!bad) printf("   rate violation: %s %d ms at %lld ms, %lld ms after the previous (level %d, target %lld)\n", kind, a, t, t - last, b, target);
-						bad++;
-					}
+				if (a > 15 || t - last < 50) {
+					if (!bad) printf("   rate violation: %s %d ms at %lld ms, %lld ms after the previous (level %d, target %lld)\n", kind, a, t, t - last, b, target);
+					bad++;
 				}
 				last = t;
 			}
