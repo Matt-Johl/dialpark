@@ -336,6 +336,23 @@ static void scenario_backlog(size_t burst)
 	CHECK(r.st.level_ms <= r.st.target_ms + PTIME_MS, "backlog drained to target: level %u target %u", r.st.level_ms, r.st.target_ms);
 	CHECK(ratio < 3.0, "no hard cut in the output (max step %.2fx the tone's own)", ratio);
 	CHECK(r.st.accelerate_ms + r.st.target_ms + 3 * PTIME_MS >= burst * PTIME_MS, "the backlog was removed by acceleration (%llu ms of %zu)", (unsigned long long)r.st.accelerate_ms, burst * PTIME_MS);
+	{
+		/* the drain is gentle once within 200 ms of target: no second of
+		 * speech is compressed by more than ~12 % (the tone is never
+		 * "silent", so this is the speech budget at work) */
+		double tmax = 0; const char *q = r.evlog; int worst_s = -1;
+		double bucket[64] = {0};
+		while (q && *q) {
+			long long t; char kind[32]; int a, b;
+			if (sscanf(q, "%lld:%31[^(](%d,%d)", &t, kind, &a, &b) == 4 && !strcmp(kind, "accelerate") && t / 1000 < 64)
+				bucket[t / 1000] += a;
+			q = strchr(q, ' '); if (q) q++;
+		}
+		for (int i = 0; i < 64; i++) if (bucket[i] > tmax) { tmax = bucket[i]; worst_s = i; }
+		printf("   worst second of compression: %.0f ms at %ds\n", tmax, worst_s);
+		if (burst * PTIME_MS <= 320)
+			CHECK(tmax <= 200, "compression never exceeds the fast-drain band plus the 10%% budget in any second (%.0f ms)", tmax);
+	}
 	free(src); free(sc.pk); free(r.out);
 }
 

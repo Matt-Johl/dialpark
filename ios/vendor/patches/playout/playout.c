@@ -24,6 +24,8 @@
 #define EXPAND_FLOOR      0.05  /* below this, concealment is zeros */
 #define UNDERRUN_BUMP_US  500000 /* a target bump per underrun at most this often */
 #define LEVEL_FILTER      0.125  /* per read: ~150 ms time constant at 20 ms reads */
+#define SCALE_RATE        0.10   /* time-scaling budget in speech: 10 % (imperceptible) */
+#define FAST_ABOVE_MS     200    /* this far above target, compress at full rate anyway */
 
 struct playout {
 	struct playout_cfg cfg;
@@ -48,6 +50,8 @@ struct playout {
 	uint64_t last_bump_us;
 	double level_f;              /* low-pass filtered level, ms (NetEq's BufferLevelFilter) */
 	bool level_primed;
+	double accel_credit;         /* ms of compression allowed in speech, accrued at SCALE_RATE */
+	double stretch_credit;
 
 	/* time scaling */
 	int16_t *hist;               /* last OUT_HISTORY_MS of output */
@@ -146,6 +150,7 @@ static void flush_locked(struct playout *p)
 	p->last_op_pos = 0;
 	p->level_f = 0;
 	p->level_primed = false;
+	p->accel_credit = p->stretch_credit = 0;
 	emit(p, "flush", 0, 0);
 }
 
@@ -387,7 +392,7 @@ static size_t quiet_offset(const int16_t *x, size_t P, size_t limit)
 /* Accelerate: n output samples from n + P input samples; one pitch period
  * removed by cross-fading x[i..i+P) into x[i+P..i+2P) at a quiet offset i.
  * Returns P, 0 if not done. */
-static size_t accelerate(struct playout *p, int16_t *out, size_t n)
+static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budget_ms)
 {
 	size_t pmin = ms_to_samp(p, PITCH_MIN_MS), pmax = ms_to_samp(p, PITCH_MAX_MS);
 	size_t w = ms_to_samp(p, CORR_WINDOW_MS), need, P, k, i;
@@ -407,13 +412,20 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n)
 		return 0;
 	take(p, p->read_pos, x, need);
 	if (rms(x, n) < SILENCE_RMS) {
-		/* silence or noise: no pitch to respect, remove the most with a
-		 * short fade */
+		/* silence or noise: no pitch to respect and nothing to hear,
+		 * remove the most with a short fade, whatever the budget */
 		P = pmax;
 		corr = 1;
 	}
 	else {
 		P = find_pitch(x, w, pmin, pmax, &corr);
+		/* speech: only within the budget. Pitch-synchronous scaling is
+		 * inaudible at ~10 %; 15 ms out of every 20 ms (one period per
+		 * read, measured 2026-11-01) is a 75 % speed-up and was heard. */
+		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+			free(x);
+			return 0;
+		}
 	}
 	i = quiet_offset(x, P, n - P);
 	for (k = 0; k < i; k++)
@@ -436,7 +448,7 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n)
 /* Preemptive expand: n output samples from n - P input samples; the pitch
  * period x[i..i+P) is played twice, the repeat cross-faded in, at a quiet
  * offset i so a transient is not doubled. Returns P, 0 if not done. */
-static size_t preemptive(struct playout *p, int16_t *out, size_t n)
+static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budget_ms)
 {
 	size_t pmin = ms_to_samp(p, PITCH_MIN_MS), pmax = ms_to_samp(p, PITCH_MAX_MS);
 	size_t w = ms_to_samp(p, CORR_WINDOW_MS), P, k, in_n, i;
@@ -460,6 +472,10 @@ static size_t preemptive(struct playout *p, int16_t *out, size_t n)
 	}
 	else {
 		P = find_pitch(x, w, pmin, pmax, &corr);
+		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+			free(x);
+			return 0;
+		}
 	}
 	in_n = n - P;
 	/* out[i+2P..n) reads x[k-P] up to x[in_n-1]: i + 2P <= n (P <= n/2) */
@@ -609,22 +625,42 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 	 * The filter follows the mean; the target already covers the teeth. */
 	p->level_f += ((double)level_ms - p->level_f) * LEVEL_FILTER;
 
+	/* The time-scaling budget: SCALE_RATE of every read, spent in speech,
+	 * unlimited in silence (the operations check) or when the level is
+	 * far from the target (a start-of-call backlog is drained at full
+	 * rate until it is within FAST_ABOVE_MS, then gently). */
+	{
+		double read_ms = (double)sampc * 1000 / p->cfg.srate, cap = 2 * PITCH_MAX_MS;
+		p->accel_credit += SCALE_RATE * read_ms;
+		p->stretch_credit += SCALE_RATE * read_ms;
+		if (p->accel_credit > cap) p->accel_credit = cap;
+		if (p->stretch_credit > cap) p->stretch_credit = cap;
+	}
+
 	avail = avail_from(p, p->read_pos, sampc);
 	if (avail >= sampc) {
 		bool merged = p->expanding;
 		size_t P = 0;
 		if (p->level_f >= p->target_ms + p->cfg.ptime_ms && level_ms >= p->target_ms) {
-			P = accelerate(p, out, sampc);
+			double budget = p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 : p->accel_credit;
+			P = accelerate(p, out, sampc, budget);
 			if (P) {
+				double ms = (double)P * 1000 / p->cfg.srate;
 				emit(p, "accelerate", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
-				p->level_f -= samp_to_ms(p, (int64_t)P);
+				p->level_f -= ms;
+				if (budget >= 0)
+					p->accel_credit -= ms;
 			}
 		}
 		else if (p->level_f + p->cfg.ptime_ms < p->target_ms && !merged) {
-			P = preemptive(p, out, sampc);
+			double budget = p->level_f < p->cfg.ptime_ms ? -1 : p->stretch_credit;
+			P = preemptive(p, out, sampc, budget);
 			if (P) {
+				double ms = (double)P * 1000 / p->cfg.srate;
 				emit(p, "preemptive", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
-				p->level_f += samp_to_ms(p, (int64_t)P);
+				p->level_f += ms;
+				if (budget >= 0)
+					p->stretch_credit -= ms;
 			}
 		}
 		if (!P) {
