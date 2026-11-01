@@ -25,7 +25,12 @@
 #define UNDERRUN_BUMP_US  500000 /* a target bump per underrun at most this often */
 #define LEVEL_FILTER      0.125  /* per read: ~150 ms time constant at 20 ms reads */
 #define SCALE_RATE        0.10   /* time-scaling budget in speech: 10 % (imperceptible) */
-#define FAST_ABOVE_MS     200    /* this far above target, compress at full rate anyway */
+#define FAST_ABOVE_MS     200    /* this far above target, the budget and the gap are lifted */
+#define MIN_OP_GAP_MS     50     /* between time-scaling operations in speech (NetEq's timescale countdown) */
+#define CORR_THRESHOLD    0.9    /* speech is time-scaled only when this periodic (NetEq's criterion);
+                                  * anything less is played as is and the excess waits for a
+                                  * pause or a vowel. Measured 2026-11-01: 10 %% scaling of
+                                  * arbitrary speech blocks was still heard as a warble. */
 
 struct playout {
 	struct playout_cfg cfg;
@@ -52,6 +57,7 @@ struct playout {
 	bool level_primed;
 	double accel_credit;         /* ms of compression allowed in speech, accrued at SCALE_RATE */
 	double stretch_credit;
+	double since_op_ms;          /* read time since the last time-scaling operation */
 
 	/* time scaling */
 	int16_t *hist;               /* last OUT_HISTORY_MS of output */
@@ -61,6 +67,10 @@ struct playout {
 	double expand_gain;
 	size_t expand_period;
 	int64_t last_op_pos;
+
+	/* sample counters, converted to ms in playout_stats (converting per
+	 * operation truncated 4.54 ms periods to 4 ms, 65 ms over one drain) */
+	int64_t normal_samp, accelerate_samp, preemptive_samp, expand_samp, zero_samp, overflow_samp;
 
 	struct playout_stats st;
 };
@@ -151,6 +161,7 @@ static void flush_locked(struct playout *p)
 	p->level_f = 0;
 	p->level_primed = false;
 	p->accel_credit = p->stretch_credit = 0;
+	p->since_op_ms = 0;
 	emit(p, "flush", 0, 0);
 }
 
@@ -248,7 +259,7 @@ static int write_locked(struct playout *p, const int16_t *pcm, size_t sampc, uin
 	 * audio; this loses the oldest, which NetEq does by flushing) */
 	if (end - p->read_pos > (int64_t)p->cap) {
 		int64_t skip = end - p->read_pos - (int64_t)p->cap;
-		p->st.overflow_ms += samp_to_ms(p, skip);
+		p->overflow_samp += skip;
 		emit(p, "overflow", (int32_t)samp_to_ms(p, skip), 0);
 		p->read_pos += skip;
 		p->expanding = false;
@@ -419,10 +430,13 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 	}
 	else {
 		P = find_pitch(x, w, pmin, pmax, &corr);
-		/* speech: only within the budget. Pitch-synchronous scaling is
+		/* speech: only a stationary, voiced block (the two periods about
+		 * to be overlapped really are repeats of each other) and only
+		 * within the budget. Pitch-synchronous scaling of such a block is
 		 * inaudible at ~10 %; 15 ms out of every 20 ms (one period per
-		 * read, measured 2026-11-01) is a 75 % speed-up and was heard. */
-		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+		 * read, measured 2026-11-01) is a 75 % speed-up and was heard,
+		 * and scaling an unvoiced or transient block at any rate warbles. */
+		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
 			free(x);
 			return 0;
 		}
@@ -439,8 +453,8 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 	free(x);
 	consume(p, p->read_pos, n + P);
 	p->read_pos += (int64_t)(n + P);
-	p->st.accelerate_ms += samp_to_ms(p, (int64_t)P);
-	p->st.normal_ms += samp_to_ms(p, (int64_t)n);
+	p->accelerate_samp += (int64_t)P;
+	p->normal_samp += (int64_t)n;
 	p->st.ops_accelerate++;
 	return P;
 }
@@ -472,7 +486,7 @@ static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budge
 	}
 	else {
 		P = find_pitch(x, w, pmin, pmax, &corr);
-		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
 			free(x);
 			return 0;
 		}
@@ -493,8 +507,8 @@ static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budge
 	free(x);
 	consume(p, p->read_pos, in_n);
 	p->read_pos += (int64_t)in_n;
-	p->st.preemptive_ms += samp_to_ms(p, (int64_t)P);
-	p->st.normal_ms += samp_to_ms(p, (int64_t)in_n);
+	p->preemptive_samp += (int64_t)P;
+	p->normal_samp += (int64_t)in_n;
 	p->st.ops_preemptive++;
 	return P;
 }
@@ -554,14 +568,14 @@ static void expand(struct playout *p, int16_t *out, size_t n)
 				out[k] = (int16_t)(EXPAND_DECAY * period[k % P]);
 			free(period);
 			p->expand_gain *= EXPAND_DECAY;
-			p->st.expand_ms += samp_to_ms(p, (int64_t)n);
+			p->expand_samp += (int64_t)n;
 			emit(p, "expand", (int32_t)samp_to_ms(p, (int64_t)n), (int32_t)p->st.level_ms);
 			return;
 		}
 	}
 	memset(out, 0, n * sizeof(int16_t));
-	p->st.zero_ms += samp_to_ms(p, (int64_t)n);
-	p->st.expand_ms += samp_to_ms(p, (int64_t)n);
+	p->zero_samp += (int64_t)n;
+	p->expand_samp += (int64_t)n;
 	emit(p, "zeros", (int32_t)samp_to_ms(p, (int64_t)n), 0);
 }
 
@@ -606,7 +620,7 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 
 	if (!p->started) {
 		memset(out, 0, sampc * sizeof(int16_t));
-		p->st.zero_ms += samp_to_ms(p, (int64_t)sampc);
+		p->zero_samp += (int64_t)sampc;
 		return;
 	}
 	level = p->write_high - p->read_pos;
@@ -626,15 +640,18 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 	p->level_f += ((double)level_ms - p->level_f) * LEVEL_FILTER;
 
 	/* The time-scaling budget: SCALE_RATE of every read, spent in speech,
-	 * unlimited in silence (the operations check) or when the level is
-	 * far from the target (a start-of-call backlog is drained at full
-	 * rate until it is within FAST_ABOVE_MS, then gently). */
+	 * capped at one period (a 30 ms cap let three periods go in 60 ms
+	 * after a quiet stretch, heard on the device 2026-11-01) and never two
+	 * operations within MIN_OP_GAP_MS; unlimited in silence (the
+	 * operations check) or when the level is far above the target (a
+	 * gross backlog is brought within FAST_ABOVE_MS first, then gently). */
 	{
-		double read_ms = (double)sampc * 1000 / p->cfg.srate, cap = 2 * PITCH_MAX_MS;
+		double read_ms = (double)sampc * 1000 / p->cfg.srate, cap = PITCH_MAX_MS;
 		p->accel_credit += SCALE_RATE * read_ms;
 		p->stretch_credit += SCALE_RATE * read_ms;
 		if (p->accel_credit > cap) p->accel_credit = cap;
 		if (p->stretch_credit > cap) p->stretch_credit = cap;
+		p->since_op_ms += read_ms;
 	}
 
 	avail = avail_from(p, p->read_pos, sampc);
@@ -642,7 +659,8 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 		bool merged = p->expanding;
 		size_t P = 0;
 		if (p->level_f >= p->target_ms + p->cfg.ptime_ms && level_ms >= p->target_ms) {
-			double budget = p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 : p->accel_credit;
+			double budget = p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 :
+					p->since_op_ms < MIN_OP_GAP_MS ? 0 : p->accel_credit;
 			P = accelerate(p, out, sampc, budget);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;
@@ -650,10 +668,12 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 				p->level_f -= ms;
 				if (budget >= 0)
 					p->accel_credit -= ms;
+				p->since_op_ms = 0;
 			}
 		}
 		else if (p->level_f + p->cfg.ptime_ms < p->target_ms && !merged) {
-			double budget = p->level_f < p->cfg.ptime_ms ? -1 : p->stretch_credit;
+			double budget = p->level_f < p->cfg.ptime_ms ? -1 :
+					p->since_op_ms < MIN_OP_GAP_MS ? 0 : p->stretch_credit;
 			P = preemptive(p, out, sampc, budget);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;
@@ -661,13 +681,14 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 				p->level_f += ms;
 				if (budget >= 0)
 					p->stretch_credit -= ms;
+				p->since_op_ms = 0;
 			}
 		}
 		if (!P) {
 			take(p, p->read_pos, out, sampc);
 			consume(p, p->read_pos, sampc);
 			p->read_pos += (int64_t)sampc;
-			p->st.normal_ms += samp_to_ms(p, (int64_t)sampc);
+			p->normal_samp += (int64_t)sampc;
 		}
 		if (merged)
 			merge(p, out, sampc);
@@ -689,7 +710,7 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 		take(p, p->read_pos, out, avail);
 		consume(p, p->read_pos, avail);
 		p->read_pos += (int64_t)avail;
-		p->st.normal_ms += samp_to_ms(p, (int64_t)avail);
+		p->normal_samp += (int64_t)avail;
 		if (p->expanding)
 			merge(p, out, avail);
 		remember(p, out, avail);
@@ -736,6 +757,12 @@ void playout_stats(const struct playout *p, struct playout_stats *st)
 		return;
 	pthread_mutex_lock((pthread_mutex_t *)&p->lock);
 	*st = p->st;
+	st->normal_ms = samp_to_ms(p, p->normal_samp);
+	st->accelerate_ms = samp_to_ms(p, p->accelerate_samp);
+	st->preemptive_ms = samp_to_ms(p, p->preemptive_samp);
+	st->expand_ms = samp_to_ms(p, p->expand_samp);
+	st->zero_ms = samp_to_ms(p, p->zero_samp);
+	st->overflow_ms = samp_to_ms(p, p->overflow_samp);
 	st->level_ms = samp_to_ms(p, p->write_high - p->read_pos);
 	st->target_ms = p->target_ms;
 	pthread_mutex_unlock((pthread_mutex_t *)&p->lock);

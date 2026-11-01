@@ -17,7 +17,8 @@ WebRTC's NetEq, which is how the industry handles the same problem:
 | below target | nothing | inserts one pitch period per read (preemptive expand) |
 | underrun | writes zeros, then refills to 40 ms | conceals by repeating the last pitch period with decay, merges real audio back with a cross-fade, and does not advance the timeline (late audio plays, delay grows, acceleration brings it back) |
 | loss (hole with later audio present) | zeros | concealed and skipped; the codec's own PLC/FEC still runs first (aureceiver's lost-frame patch) |
-| rate of correction | one skip per render buffer, no limit | 10 % of read time in speech (NetEq's timescale countdown, as a budget), unlimited in silence or ≥ 200 ms above target |
+| where correction happens | any frame | only a stationary, voiced block (normalised correlation of the two periods ≥ 0.9, NetEq's criterion) or a quiet one; unvoiced and transient speech is played as is and the excess waits for a pause or a vowel |
+| rate of correction | one skip per render buffer, no limit | 10 % of read time in speech, one period at most per operation, 50 ms at least between operations (NetEq's timescale countdown); unlimited in silence or ≥ 200 ms above target |
 | target | reorder-driven jitter buffer wish + adaptive play buffer | a high quantile of arrival lateness relative to the fastest recent packet, plus one packet; up at once, down one packet at a time; bumped on an underrun |
 | decision input | raw level | low-pass filtered level (NetEq's BufferLevelFilter), so bunched arrival does not cause accelerate/stretch oscillation |
 
@@ -28,14 +29,21 @@ Plain C99, one lock, no dependencies, mono S16LE at the player's rate.
 - `playout.h`, `playout.c` — the engine. Copied into `baresip/src/` by
   `build-baresip.sh apply_patches` and added to `CMakeLists.txt` by
   `apply-baresip.sh`.
-- `test/playout_test.c` — 26 scenario tests, `make lab-playout-test`:
+- `test/playout_test.c` — 30 scenario tests, `make lab-playout-test`:
   nominal (bit-exact at 8/16/48 kHz, 20 ms reads; one packet of headroom
   built once for unaligned 512/1024-sample reads; 5 minutes), start
   backlogs of 8/15/30 packets, stalls of 60/100/150/300 ms, Wi-Fi bunching
   5-per-105 ms and 10-per-200 ms, jitter 0–30/0–80 ms, loss 2 %/5 %/double,
-  reordered pairs, ±0.1 % clock drift, a 600 ms straggler, flush/restart.
-  Judges: bit-exactness, every click of a click train surviving, spacing
-  deviations, no sample step larger than the signal's own (hard cut),
+  reordered pairs, ±0.1 % clock drift, a 600 ms straggler, flush/restart;
+  white noise with pauses and a 300 ms backlog (every noise segment
+  sample-exact, the backlog taken out of the pauses), tone/noise
+  alternating with no pause (noise exact, the tone drained at the gentle
+  rate), a 200 ms target floor against noise and against the tone (noise
+  never stretched, headroom built in the pause; the tone stretched
+  without a hard step).
+  Judges: bit-exactness, sample-exact segments, the rate rule read off
+  the event log (≤ 15 ms per operation, ≥ 50 ms apart, outside the fast
+  band), every click of a click train surviving, spacing deviations, no sample step larger than the signal's own (hard cut),
   zeros only before the first packet or past the 240 ms concealment
   horizon, level settled to target. `-w out.wav <scenario>` writes the
   output; `harness/spike/assert_audio.py --continuity` on it is the
@@ -63,6 +71,6 @@ App config (`BaresipCallEngine.stackConfig`): `audio_jitter_buffer_type off`, `a
 
 Carry over: the engine (unchanged, with its tests and make target), hunks 1–6 (dropping `aubuf` entirely rather than leaving it allocated), the `rtprecv.c` loss-count hunk, the config change, and a per-call summary line reduced to the engine's counters (`po_accel_ms`, `po_stretch_ms`, `po_conceal_ms`, `po_zero_ms`, `po_late`, target range). Leave behind: the event ring and dump (lab instrumentation), the AB_*/JB_* hooks (the code they instrument is no longer on the path), `-lab-pump-delay`, `-rtp-trace`.
 
-Tunables worth knowing on the production branch: `SCALE_RATE` 0.10 and `FAST_ABOVE_MS` 200 (the correction rate; one period per read was heard as a 75 % speed-up on the device), `TARGET_QUANTILE` 0.95, `HIST_PACKETS` 100.
+Tunables worth knowing on the production branch: `CORR_THRESHOLD` 0.9 (where scaling is allowed; 10 % scaling of arbitrary speech blocks was still heard as a warble on the device), `SCALE_RATE` 0.10, `MIN_OP_GAP_MS` 50 and `FAST_ABOVE_MS` 200 (the rate; one period per read was heard as a 75 % speed-up), `TARGET_QUANTILE` 0.95, `HIST_PACKETS` 100. Counters are kept in samples and converted once in `playout_stats` (per-operation rounding lost 65 ms over one drain).
 
 Known limits: mono S16LE only (what the app negotiates); concealment decays to silence after ~240 ms (any PLC does); acceleration attenuates an isolated 2 ms transient that falls inside a cross-fade (the quiet-offset choice avoids it when the block has a stationary stretch; the harness detector saw none lost on the 600 ms backlog drain).

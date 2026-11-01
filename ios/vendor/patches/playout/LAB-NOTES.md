@@ -65,6 +65,45 @@ Still to confirm on the device with this build (frameworks rebuilt,
 typecheck passed; the simulator runs were blocked by the native server
 holding 5061/7443).
 
+### Where correction is allowed (device, 2026-11-01, later)
+
+With the budget in place Matt still heard the start as "notably weird". The
+event dump of that call: 120 ms compressed at full rate in the first 160 ms
+(blocks judged silent), then one 15 ms period every 300–400 ms through
+speech, then three periods (28 ms) within 60 ms at +5.06 s where the credit
+had accrued to its 30 ms cap during a quiet stretch. Two gaps against NetEq:
+it time-scales only blocks that are stationary and voiced (correlation of
+the two overlapped periods above 0.9) or quiet, and never two operations
+within 50 ms; our engine scaled any speech block once the budget allowed.
+Pitch-synchronous scaling of a steady vowel at 10 % is inaudible; the same
+on an unvoiced or transient block warbles.
+
+The engine now follows NetEq's criteria: `CORR_THRESHOLD` 0.9 for both
+accelerate and preemptive expand, the credit capped at one period,
+`MIN_OP_GAP_MS` 50 in speech. Excess that cannot be taken from voiced sound
+is carried as latency until the next pause (unlimited rate in silence).
+Conversational speech is roughly 40 % pauses, so a 300 ms backlog is gone
+within the first exchange; 300 ms of extra one-way delay for a few seconds
+is within G.114's acceptable range. The fast band (≥ 200 ms above target)
+lifts the rate limits but not the correlation gate, as in NetEq's fast
+accelerate.
+
+New unit scenarios prove the criterion directly: white noise with pauses
+and a 15-packet backlog comes out sample-exact in every noise segment with
+all 18 operations inside the first pause; tone/noise alternating with no
+pause has every noise segment exact and the drain confined to the tone at
+4.5 ms per 60 ms; a 200 ms target floor is never built by stretching noise
+(exact) but is built in the pause, and in the tone at the gentle rate with
+no hard step. Counters are now kept in samples: per-operation rounding had
+been losing 65 ms over one drain, which is why the backlog-30 judge seemed
+to miss 100 ms.
+
+The remaining question is what the first 160 ms of the call really were:
+the blocks were below the 120 RMS silence threshold, so compressing them
+at full rate should be inaudible. If the next device test still sounds
+wrong at the very start, the thing to look at is that threshold against
+CUCM's comfort noise level (events carry the level only, not the RMS).
+
 Bench (harness phones, click-train detector on the recording):
 
 | Scenario | before | after |
@@ -75,7 +114,7 @@ Bench (harness phones, click-train detector on the recording):
 | stall 60 ms ×2 | 36 ms removed, 40 ms inserted | 0 removed, 40 ms inserted (the wait itself) |
 | quiet 60 s | 0 / 0 | 12 ms compressed at start, one 20 ms wait |
 
-Unit scenarios (`make lab-playout-test`): 26, all pass; nominal paths bit-exact.
+Unit scenarios (`make lab-playout-test`): 30, all pass; nominal paths bit-exact.
 Regression with the engine in the harness phones: harness-trunk (all
 scenarios), harness-delayed-offer, harness-call pass.
 

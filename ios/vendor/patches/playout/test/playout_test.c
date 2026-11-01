@@ -55,15 +55,36 @@ static void write_wav(const char *path, const int16_t *x, size_t n, uint32_t sra
 
 /* ---- signal ------------------------------------------------------------------ */
 
-/* 440 Hz tone with a 2 ms raised-cosine 2.4 kHz click every 250 ms from
- * 250 ms, plus (kind==1) a 150 Hz voiced buzz instead of the tone. */
+static uint32_t rng_state = 12345;
+static uint32_t rng(void) { rng_state = rng_state * 1664525u + 1013904223u; return rng_state; }
+static double urand(void) { return (rng() >> 8) / 16777216.0; }
+
+/* kind 0: 440 Hz tone with a 2 ms raised-cosine 2.4 kHz click every 250 ms
+ * from 250 ms; 1: a 150 Hz voiced buzz with the clicks; 2: the pure tone;
+ * 3: white noise at speech level (unvoiced: no periodicity to scale) with
+ * a one-second pause every four seconds (t mod 4 in [3,4)); 4: one second
+ * of tone and one of noise, alternating, no pause. */
+#define NOISE_AMP 8000.0
+static int noise_at(double t, int kind)
+{
+	if (kind == 3) return fmod(t, 4.0) < 3.0;
+	if (kind == 4) return fmod(t, 2.0) >= 1.0;
+	return 0;
+}
 static int16_t *make_signal(uint32_t srate, double seconds, int kind, size_t *n_out)
 {
 	size_t n = (size_t)(srate * seconds), i;
 	int16_t *x = calloc(n, sizeof(int16_t));
+	if (kind >= 3) rng_state = 777; /* the noise is the same on every run */
 	for (i = 0; i < n; i++) {
 		double t = (double)i / srate, v;
-		if (kind == 0 || kind == 2) {
+		if (kind == 3 && !noise_at(t, 3)) {
+			v = 0;
+		}
+		else if (noise_at(t, kind)) {
+			v = (urand() - 0.5) * NOISE_AMP;
+		}
+		else if (kind == 0 || kind == 2 || kind == 4) {
 			v = TONE_AMP * sin(2 * M_PI * TONE_HZ * t);
 		}
 		else {
@@ -71,7 +92,7 @@ static int16_t *make_signal(uint32_t srate, double seconds, int kind, size_t *n_
 			double ph = fmod(t * 150.0, 1.0);
 			v = 9000.0 * exp(-ph * 12.0) * cos(2 * M_PI * 800.0 * ph / 150.0);
 		}
-		if (kind != 2) {
+		if (kind == 0 || kind == 1) {
 			double ms = t * 1000.0, c = fmod(ms, CLICK_MS);
 			if (ms >= CLICK_MS && c < 2.0) {
 				double w = 0.5 * (1 - cos(2 * M_PI * c / 2.0));
@@ -109,10 +130,6 @@ static struct script script_alloc(size_t frames)
 	}
 	return s;
 }
-
-static uint32_t rng_state = 12345;
-static uint32_t rng(void) { rng_state = rng_state * 1664525u + 1013904223u; return rng_state; }
-static double urand(void) { return (rng() >> 8) / 16777216.0; }
 
 /* ---- simulation ------------------------------------------------------------------ */
 
@@ -269,6 +286,53 @@ static int exact_after_start(const struct run *r, const int16_t *src, size_t src
 	return 1;
 }
 
+/* Is src[from..from+len) present in the output, sample for sample? The
+ * segment's first 480 samples locate it (noise is unique), then the whole
+ * segment must follow. A time-scaling operation anywhere inside breaks it. */
+static int segment_exact(const struct run *r, const int16_t *src, size_t from, size_t len, size_t *at)
+{
+	size_t probe = 480, i;
+	if (len < probe || r->out_n < probe) return 0;
+	for (i = 0; i + len <= r->out_n; i++) {
+		if (r->out[i] != src[from] || memcmp(r->out + i, src + from, probe * sizeof(int16_t)))
+			continue;
+		*at = i;
+		return memcmp(r->out + i, src + from, len * sizeof(int16_t)) == 0;
+	}
+	*at = 0;
+	return 0;
+}
+
+/* The rate rule, read off the event log: outside the fast band (level
+ * at least FAST_ABOVE above the target at the time) no time-scaling
+ * operation is larger than one period (15 ms) and no two are closer than
+ * MIN_OP_GAP (50 ms). For scenarios without silence, where the rule is
+ * lifted. Returns the number of violations; prints the first. */
+static int judge_rate(const struct run *r)
+{
+	const char *q = r->evlog;
+	long long target = 40, last = -1000000;
+	int bad = 0;
+	while (q && *q) {
+		long long t; char kind[32]; int a, b;
+		if (sscanf(q, "%lld:%31[^(](%d,%d)", &t, kind, &a, &b) == 4) {
+			if (!strcmp(kind, "target"))
+				target = b;
+			else if (!strcmp(kind, "accelerate") || !strcmp(kind, "preemptive")) {
+				if (b < target + 200 - 40) { /* clearly outside the fast band */
+					if (a > 15 || t - last < 50) {
+						if (!bad) printf("   rate violation: %s %d ms at %lld ms, %lld ms after the previous (level %d, target %lld)\n", kind, a, t, t - last, b, target);
+						bad++;
+					}
+				}
+				last = t;
+			}
+		}
+		q = strchr(q, ' '); if (q) q++;
+	}
+	return bad;
+}
+
 static void report(const char *name, const struct run *r)
 {
 	printf("%-28s normal=%llums accel=%llums(%u) preempt=%llums(%u) expand=%llums(%u) zeros=%llums late=%u overflow=%llums target=%ums level=%ums max=%ums events=%d\n",
@@ -336,6 +400,7 @@ static void scenario_backlog(size_t burst)
 	CHECK(r.st.level_ms <= r.st.target_ms + PTIME_MS, "backlog drained to target: level %u target %u", r.st.level_ms, r.st.target_ms);
 	CHECK(ratio < 3.0, "no hard cut in the output (max step %.2fx the tone's own)", ratio);
 	CHECK(r.st.accelerate_ms + r.st.target_ms + 3 * PTIME_MS >= burst * PTIME_MS, "the backlog was removed by acceleration (%llu ms of %zu)", (unsigned long long)r.st.accelerate_ms, burst * PTIME_MS);
+	CHECK(judge_rate(&r) == 0, "one period at most per operation, 50 ms at least between operations, outside the fast band");
 	{
 		/* the drain is gentle once within 200 ms of target: no second of
 		 * speech is compressed by more than ~12 % (the tone is never
@@ -562,6 +627,86 @@ static void scenario_flush(void)
 	playout_free(p);
 }
 
+/* The industry criterion (NetEq): speech is time-scaled only where it is
+ * stationary and voiced, or quiet. White noise is neither: with a start
+ * backlog, every noise segment must come out sample-exact and the whole
+ * backlog must be taken out of the pauses. */
+static void scenario_noise_backlog(size_t burst)
+{
+	size_t n, at, seg, frames;
+	int16_t *src = make_signal(48000, 12.0, 3, &n);
+	struct script sc = script_alloc(n / (48000 * PTIME_MS / 1000));
+	struct run r;
+	frames = sc.n;
+	for (size_t i = 0; i < burst && i < frames; i++)
+		sc.pk[i].arrival_us = 300000 + (int64_t)burst * PTIME_MS * 1000;
+	r = simulate(src, n, 48000, &sc, 960, &cfg48, 0);
+	report("noise backlog (pauses)", &r);
+	if (wav_out) write_wav(wav_out, r.out, r.out_n, 48000);
+	for (seg = 0; seg < 3; seg++) {
+		size_t from = (size_t)(48000 * (seg * 4.0)), len = 48000 * 3;
+		CHECK(segment_exact(&r, src, from, len, &at), "noise %zu-%zu s is played sample-exact (nothing time-scaled in unvoiced sound), found at %.0f ms", seg * 4, seg * 4 + 3, at * 1000.0 / 48000);
+	}
+	CHECK(r.st.accelerate_ms + r.st.target_ms + 2 * PTIME_MS >= burst * PTIME_MS, "the backlog was taken out of the pauses (%llu ms of %zu)", (unsigned long long)r.st.accelerate_ms, burst * PTIME_MS);
+	CHECK(r.st.level_ms <= r.st.target_ms + PTIME_MS, "level %u within target %u + one packet by the end", r.st.level_ms, r.st.target_ms);
+	CHECK(r.st.expand_ms == 0 && r.st.late_packets == 0, "nothing concealed, nothing dropped");
+	free(src); free(sc.pk); free(r.out);
+}
+
+/* Tone and noise alternating with no pause: the backlog is taken out of
+ * the tone (voiced) at the gentle rate, never out of the noise. */
+static void scenario_mixed_backlog(size_t burst)
+{
+	size_t n, at, seg, frames;
+	int16_t *src = make_signal(48000, 12.0, 4, &n);
+	struct script sc = script_alloc(n / (48000 * PTIME_MS / 1000));
+	struct run r;
+	frames = sc.n;
+	for (size_t i = 0; i < burst && i < frames; i++)
+		sc.pk[i].arrival_us = 300000 + (int64_t)burst * PTIME_MS * 1000;
+	r = simulate(src, n, 48000, &sc, 960, &cfg48, 0);
+	report("mixed backlog (no pause)", &r);
+	if (wav_out) write_wav(wav_out, r.out, r.out_n, 48000);
+	for (seg = 0; seg < 6; seg++) {
+		size_t from = (size_t)(48000 * (seg * 2.0 + 1.0)) + 2400, len = 48000 - 4800; /* 50 ms inside the segment: the fades at its edges belong to the tone */
+		CHECK(segment_exact(&r, src, from, len, &at), "noise %zu-%zu s is played sample-exact, found at %.0f ms", seg * 2 + 1, seg * 2 + 2, at * 1000.0 / 48000);
+	}
+	CHECK(r.st.accelerate_ms + r.st.target_ms + 2 * PTIME_MS >= burst * PTIME_MS, "the backlog was taken out of the tone (%llu ms of %zu)", (unsigned long long)r.st.accelerate_ms, burst * PTIME_MS);
+	CHECK(judge_rate(&r) == 0, "one period at most per operation, 50 ms at least between operations");
+	CHECK(r.st.level_ms <= r.st.target_ms + PTIME_MS, "level %u within target %u + one packet by the end", r.st.level_ms, r.st.target_ms);
+	CHECK(r.st.expand_ms == 0 && r.st.late_packets == 0, "nothing concealed, nothing dropped");
+	free(src); free(sc.pk); free(r.out);
+}
+
+/* Below target (a 200 ms floor against a 20-40 ms level): stretching
+ * follows the same criterion. Noise is never stretched (sample-exact) and
+ * the headroom is built in the pause; the tone is stretched at the gentle
+ * rate without a hard step. */
+static void scenario_floor(int kind)
+{
+	struct playout_cfg cfg = { 48000, 200, 400, PTIME_MS };
+	size_t n, at;
+	int16_t *src = make_signal(48000, 12.0, kind, &n);
+	struct script sc = script_alloc(n / (48000 * PTIME_MS / 1000));
+	struct run r = simulate(src, n, 48000, &sc, 960, &cfg, 0);
+	report(kind == 3 ? "floor 200 ms, noise" : "floor 200 ms, tone", &r);
+	if (wav_out) write_wav(wav_out, r.out, r.out_n, 48000);
+	if (kind == 3) {
+		CHECK(segment_exact(&r, src, 0, 48000 * 3, &at), "noise 0-3 s is played sample-exact (nothing stretched in unvoiced sound)");
+		CHECK(segment_exact(&r, src, 48000 * 4, 48000 * 3, &at), "noise 4-7 s is played sample-exact, found at %.0f ms", at * 1000.0 / 48000);
+		CHECK(segment_exact(&r, src, 48000 * 8, 48000 * 3, &at), "noise 8-11 s is played sample-exact, found at %.0f ms", at * 1000.0 / 48000);
+	}
+	else {
+		double ratio = tone_step_ratio(r.out, r.out_n, 48000);
+		CHECK(ratio < 3.0, "no hard step in the stretched tone (max step %.2fx the tone's own at %.0f ms)", ratio, step_at_ms);
+		CHECK(judge_rate(&r) == 0, "one period at most per operation, 50 ms at least between operations");
+	}
+	CHECK(r.st.preemptive_ms + 2 * PTIME_MS >= 200 - 40, "the headroom was built by stretching (%llu ms)", (unsigned long long)r.st.preemptive_ms);
+	CHECK(r.st.level_ms + 2 * PTIME_MS >= r.st.target_ms, "level %u reached target %u", r.st.level_ms, r.st.target_ms);
+	CHECK(r.st.accelerate_ms == 0 && r.st.expand_ms == 0 && r.st.late_packets == 0, "no compression, nothing concealed, nothing dropped");
+	free(src); free(sc.pk); free(r.out);
+}
+
 int main(int argc, char **argv)
 {
 	const char *only = NULL;
@@ -584,6 +729,10 @@ int main(int argc, char **argv)
 	RUN("backlog-15", scenario_backlog(15));
 	RUN("backlog-8", scenario_backlog(8));
 	RUN("backlog-30", scenario_backlog(30));
+	RUN("noise-backlog", scenario_noise_backlog(15));
+	RUN("mixed-backlog", scenario_mixed_backlog(10));
+	RUN("floor-noise", scenario_floor(3));
+	RUN("floor-tone", scenario_floor(2));
 	RUN("stall-60", scenario_stall(60, 0));
 	RUN("stall-100", scenario_stall(100, 1));
 	RUN("stall-150", scenario_stall(150, 1));
