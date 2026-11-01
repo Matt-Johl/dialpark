@@ -42,6 +42,29 @@ Real engine (iOS simulator, CoreAudio output, docker server):
 | clean 30 s | 120 ms removed at start | 148 ms compressed in the first 2 s, then **no operation for 28 s** |
 | impaired 30 s (2 % loss, 30 ± 10 ms jitter) | 150 ms removed (4 wish-shrink cuts, 7 ajb skips), 200 ms zeros, 5 underruns | 0 removed, 0 concealed by the engine (Opus PLC/FEC first), 1 ms zeros at hangup, target 40–145 |
 
+### The rate of correction (device, 2026-11-01 evening)
+
+Three CUCM calls with the engine in place: `removed_ms=0`, no zeros, no
+concealment, `po_accel_ms` 246–317 — the start backlog kept and compressed.
+Matt still heard a "super funky" first couple of seconds. The event dump
+shows why: the engine removed one pitch period (15 ms) in **every** 20 ms
+read while above target — six reads in a row at +3.96 s and twelve in a row
+at +5.68 s while the target stepped 280 → 40 — a 75 % speed-up, which is
+audible as pitch-preserved gabble even though nothing is cut. NetEq avoids
+this with a countdown between time-scaling operations (one per 50 ms unless
+the buffer is far above target). The engine now has the same rule as a
+budget: 10 % of read time may be time-scaled in speech (one 15 ms period
+per ~150 ms, below the perception threshold for pitch-synchronous scaling),
+unlimited in silence (nothing to hear) and when the level is 200 ms or more
+above target (a gross backlog is brought near target first). Unit scenario
+judge added: the worst second of compression (backlog-15: 100 ms). Bench
+backlog scenario: all clicks present, the correction spread over 0.9–3.2 s
+instead of 0.3 s.
+
+Still to confirm on the device with this build (frameworks rebuilt,
+typecheck passed; the simulator runs were blocked by the native server
+holding 5061/7443).
+
 Bench (harness phones, click-train detector on the recording):
 
 | Scenario | before | after |
