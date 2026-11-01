@@ -22,6 +22,8 @@ RUN git clone --depth 1 --branch "$BARESIP_VERSION" https://github.com/baresip/r
 # the repo root for this): the receive-path packet-loss concealment is what
 # the audio-quality gates measure, so the harness phone must carry it too.
 COPY ios/vendor/patches/apply-baresip.sh ios/vendor/patches/apply-re.sh /src/
+# Lab (lab/audio-continuity): the playout engine the patches wire in.
+COPY ios/vendor/patches/playout/playout.c ios/vendor/patches/playout/playout.h /src/baresip/src/
 RUN sh /src/apply-baresip.sh /src/baresip && sh /src/apply-re.sh /src/re
 # The app's codec modules too: g722 built from WebRTC's public-domain G.722
 # (no spandsp) and g711, both with the packet-loss concealment the
