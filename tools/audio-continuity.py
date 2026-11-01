@@ -59,41 +59,57 @@ def kv(line):
 # ---- app side ---------------------------------------------------------------
 
 def app_calls(path):
-    """Every call in an app log: dial/incoming time, established, closed,
-    the continuity summary and its events."""
+    """Every call in an app log, anchored on its "engine: call <id>
+    established" line and closed by its "engine: audio continuity call=<id>"
+    summary (the event lines follow the summary). The events count from the
+    engine's reset at dial/incoming; the MARK a=2 event is the established
+    moment, so t0 = established timestamp - t(MARK 2) puts wall-clock
+    windows and events on one axis."""
     calls = []
     cur = None
+    pending = None  # established but not yet summarised
     for raw in open(path, errors="replace"):
         line = raw.rstrip("\n")
         ts = parse_ts(line)
         if ts is None:
             continue
         body = line.split(" ", 1)[1] if " " in line else ""
-        m = re.search(r"engine: (?:dial|incoming call) .*?call[= ]?([A-Za-z0-9@._-]+)", body)
-        if m or "engine: dialling" in body or "engine: incoming" in body:
-            cur = {"start": ts, "id": m.group(1) if m else "?", "events": [], "windows": [], "summary": None,
-                   "established": None, "closed": None, "marks": []}
-            calls.append(cur)
+        m = re.search(r"engine: call (\S+) established with (\S+?);", body)
+        if m:
+            pending = {"id": m.group(1), "peer": m.group(2), "established": ts, "start": ts, "events": [],
+                       "windows": [], "summary": None, "closed": None, "marks": [], "incoming": "held until" in body}
+            calls.append(pending)
+            cur = None
             continue
-        if cur is None:
+        m = re.search(r"engine: audio continuity call=(\S+): (.*)$", body)
+        if m:
+            cid = m.group(1)
+            target = pending if pending and pending["id"] == cid else next((c for c in reversed(calls) if c["id"] == cid), None)
+            if target is None:
+                continue
+            target["summary"] = m.group(2)
+            cur = target
+            pending = None
             continue
-        if "established with" in body:
-            cur["established"] = ts
-            m2 = re.search(r"call (\S+) established", body)
-            if m2:
-                cur["id"] = m2.group(1)
-        elif "engine: audio session active" in body or "callkit: audio session activated" in body:
-            cur["marks"].append((ts, body.split("engine: ")[-1][:60]))
-        elif "engine: audio event +" in body:
-            m2 = re.search(r"audio event \+([\d.]+)s (\S+) a=(-?\d+) b=(-?\d+)", body)
-            if m2:
-                cur["events"].append((float(m2.group(1)), m2.group(2), int(m2.group(3)), int(m2.group(4))))
-        elif "engine: audio continuity call=" in body:
-            cur["summary"] = body.split(": ", 2)[-1]
-        elif re.search(r"engine: .* — \d+s: play=", body):
-            cur["windows"].append((ts, body.split("engine: ", 1)[1]))
-        elif "closed (" in body and "engine: call" in body:
-            cur["closed"] = ts
+        if cur is not None:
+            m = re.search(r"audio event \+([\d.]+)s (\S+) a=(-?\d+) b=(-?\d+)", body)
+            if m:
+                cur["events"].append((float(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))))
+                continue
+            if "engine:" in body and "audio event" not in body:
+                cur = None  # the dump is over
+        if pending is not None:
+            if re.search(r"engine: .* — \d+s: play=", body):
+                pending["windows"].append((ts, body.split("engine: ", 1)[1]))
+            elif "engine: audio session active" in body or "callkit: audio session activated" in body or "audio route change" in body:
+                pending["marks"].append((ts, body[:90]))
+            elif "closed (" in body and "engine: call" in body:
+                pending["closed"] = ts
+    # Zero each call's axis on its established mark.
+    for c in calls:
+        est_t = next((t for t, k, a, b in c["events"] if k == "MARK" and a == 2), None)
+        if est_t is not None:
+            c["start"] = c["established"] - timedelta(seconds=est_t / 1000)
     return calls
 
 
