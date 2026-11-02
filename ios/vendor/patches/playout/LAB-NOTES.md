@@ -145,6 +145,39 @@ dense runs only as `PO_ACCEL_Q` with b well under 120. If the start still
 sounds wrong while the dump shows only quiet-block operations, the silence
 threshold against CUCM's comfort noise is the next thing to measure.
 
+### Device check with the quiet-block kinds (2026-11-02, three CUCM calls of 5–9 s, one app-to-app call of 78 s)
+
+The quiet kinds settle the question of the dense runs: every one of them
+was `PO_ACCEL_Q` with a block RMS of 0–23 (and single operations up to
+118), i.e. the far end silent. Operations on speech were rare and small:
+one 6 ms, two 9 ms, three of 9/9/6 ms at 60 ms spacing, none at all in the
+78 s call. Per rule, as designed. Two further findings:
+
+- **The drain is paced by the target, not by the rules.** The target steps
+  down one packet per ~400 ms and the level follows it, one 15 ms
+  operation per step, until the backlog packets leave the 100-packet
+  window ~1.9 s after the first read and the target collapses to 40 ms;
+  the remaining ~200 ms then goes in 300 ms, in quiet blocks here. The
+  latency therefore stays near the backlog for the first two seconds.
+  Gentle and inaudible as it is, it is a property of the delay manager's
+  one-packet-per-decision descent, not of the scaling rules.
+- **The summary line under-counted.** `po_accel_ms` summed `PO_ACCEL`
+  only (6, 18, 24 ms against 276, 213, 198 ms in the dumps). Now
+  `po_accel_quiet_ms` / `po_stretch_quiet_ms` carry the quiet blocks.
+
+Whether the 0.9 gate refuses too much real speech cannot be read from
+these calls, because so little speech scaling was wanted. Two changes for
+the next ones: the pitch lag is now searched at 4 kHz as NetEq does (the
+pitch dominates there and a harmonic is not mistaken for it), refined at
+the full rate for sample alignment, with the gate still reading the
+full-rate correlation (NetEq's criterion is full-rate too; the 4 kHz value
+at an integer lag under-read the synthetic voice to ~0.9 and the stall
+scenarios never drained); and the engine counts speech blocks the gate
+refused against those it passed, as `PO_GATE a=refused b=passed` every 25
+refusals and `po_gate=refused/passed` on the summary line. A device call
+with speech at the start, read with those counters, decides whether 0.9 at
+the 10 ms window is right for Opus speech at 48 kHz.
+
 Bench (harness phones, click-train detector on the recording):
 
 | Scenario | before | after |

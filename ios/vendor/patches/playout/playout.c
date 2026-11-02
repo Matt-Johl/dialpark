@@ -58,6 +58,7 @@ struct playout {
 	double accel_credit;         /* ms of compression allowed in speech, accrued at SCALE_RATE */
 	double stretch_credit;
 	double since_op_ms;          /* read time since the last time-scaling operation */
+	uint32_t gate_reported;      /* gate_refused at the last "gate" event */
 
 	/* time scaling */
 	int16_t *hist;               /* last OUT_HISTORY_MS of output */
@@ -320,28 +321,78 @@ static double rms(const int16_t *x, size_t n)
 	return sqrt(acc / n);
 }
 
-/* Best lag P in [pmin, pmax] such that x[0..w) resembles x[P..P+w):
- * normalised cross-correlation. x must hold pmax + w samples. */
-static size_t find_pitch(const int16_t *x, size_t w, size_t pmin, size_t pmax, double *best_corr)
+/* Normalised cross-correlation of x[0..w) with x[P..P+w). */
+static double ncorr(const int16_t *x, size_t w, size_t P)
 {
-	size_t P, best = pmin, k;
-	double bestc = -2;
-	double e0 = 0;
-	for (k = 0; k < w; k++)
+	double c = 0, e0 = 0, e1 = 0;
+	size_t k;
+	for (k = 0; k < w; k++) {
+		c += (double)x[k] * x[k + P];
 		e0 += (double)x[k] * x[k];
-	for (P = pmin; P <= pmax; P++) {
-		double c = 0, e1 = 0;
-		for (k = 0; k < w; k++) {
-			c += (double)x[k] * x[k + P];
-			e1 += (double)x[k + P] * x[k + P];
+		e1 += (double)x[k + P] * x[k + P];
+	}
+	return (e0 > 0 && e1 > 0) ? c / sqrt(e0 * e1) : -2;
+}
+
+/* Best lag P in [pmin, pmax] such that x[0..w) resembles x[P..P+w).
+ * As NetEq: the lag is searched at 4 kHz (the block box-averaged down by
+ * D = srate/4000), where the pitch dominates and a harmonic is not
+ * mistaken for it, then refined within one decimation step at the full
+ * rate so the overlap-add is sample-aligned; the correlation that gates
+ * the operation is the full-rate one at the refined lag (NetEq computes
+ * its 0.9 criterion at the full rate too; the 4 kHz value at an integer
+ * lag under-reads a 150 Hz voice with an 800 Hz resonance to ~0.9 and the
+ * stall scenarios never drained). x must hold pmax + w samples. */
+#define DECIM_RATE 4000
+static size_t find_pitch(const struct playout *p, const int16_t *x, size_t w, size_t pmin, size_t pmax, double *best_corr)
+{
+	size_t D = p->cfg.srate / DECIM_RATE, P, best, k, lo, hi, L, bestL = 0, ny, wy;
+	double bestc = -2, c;
+	int16_t ybuf[1024], *y = ybuf;
+	if (D < 1)
+		D = 1;
+	ny = (w + pmax) / D;
+	wy = w / D;
+	lo = pmin / D ? pmin / D : 1;
+	hi = pmax / D;
+	if (ny > sizeof(ybuf) / sizeof(ybuf[0]) || wy < 4 || hi < lo) {
+		/* an unusual geometry: full-rate search, full-band gate */
+		best = pmin;
+		for (P = pmin; P <= pmax; P++) {
+			c = ncorr(x, w, P);
+			if (c > bestc) { bestc = c; best = P; }
 		}
-		if (e0 <= 0 || e1 <= 0)
-			continue;
-		c /= sqrt(e0 * e1);
-		if (c > bestc) {
-			bestc = c;
-			best = P;
+		if (best_corr) *best_corr = bestc;
+		return best;
+	}
+	for (k = 0; k < ny; k++) {
+		long acc = 0;
+		size_t j;
+		for (j = 0; j < D; j++)
+			acc += x[k * D + j];
+		y[k] = (int16_t)(acc / (long)D);
+	}
+	for (L = lo; L <= hi && L + wy <= ny; L++) {
+		c = ncorr(y, wy, L);
+		if (c > bestc) { bestc = c; bestL = L; }
+	}
+	if (bestc <= -2) {
+		if (best_corr) *best_corr = bestc;
+		return pmin;
+	}
+	/* refine at the full rate within one step either side; the gate
+	 * reads this correlation */
+	best = bestL * D;
+	{
+		double bestf = -2;
+		size_t from = best > D ? best - D : pmin, to = best + D;
+		if (from < pmin) from = pmin;
+		if (to > pmax) to = pmax;
+		for (P = from; P <= to; P++) {
+			c = ncorr(x, w, P);
+			if (c > bestf) { bestf = c; best = P; }
 		}
+		bestc = bestf;
 	}
 	if (best_corr)
 		*best_corr = bestc;
@@ -430,7 +481,7 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 		corr = 1;
 	}
 	else {
-		P = find_pitch(x, w, pmin, pmax, &corr);
+		P = find_pitch(p, x, w, pmin, pmax, &corr);
 		/* speech: only a stationary, voiced block (the two periods about
 		 * to be overlapped really are repeats of each other) and only
 		 * within the budget. Pitch-synchronous scaling of such a block is
@@ -438,10 +489,16 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 		 * read, measured 2026-11-01) is a 75 % speed-up and was heard,
 		 * and scaling an unvoiced or transient block at any rate warbles. */
 		*quiet_rms = -1; /* speech */
-		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
+		if (corr < CORR_THRESHOLD) {
+			p->st.gate_refused++;
 			free(x);
 			return 0;
 		}
+		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+			free(x);
+			return 0;
+		}
+		p->st.gate_passed++;
 	}
 	i = quiet_offset(x, P, n - P);
 	for (k = 0; k < i; k++)
@@ -489,11 +546,17 @@ static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budge
 	}
 	else {
 		*quiet_rms = -1; /* speech */
-		P = find_pitch(x, w, pmin, pmax, &corr);
-		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
+		P = find_pitch(p, x, w, pmin, pmax, &corr);
+		if (corr < CORR_THRESHOLD) {
+			p->st.gate_refused++;
 			free(x);
 			return 0;
 		}
+		if (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms) {
+			free(x);
+			return 0;
+		}
+		p->st.gate_passed++;
 	}
 	in_n = n - P;
 	/* out[i+2P..n) reads x[k-P] up to x[in_n-1]: i + 2P <= n (P <= n/2) */
@@ -661,6 +724,12 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 	}
 
 	avail = avail_from(p, p->read_pos, sampc);
+	if (p->st.gate_refused >= p->gate_reported + 25) {
+		/* lab: how often a speech block wanted scaling and was refused
+		 * by the correlation gate, against how often one passed */
+		p->gate_reported = p->st.gate_refused;
+		emit(p, "gate", (int32_t)p->st.gate_refused, (int32_t)p->st.gate_passed);
+	}
 	if (avail >= sampc) {
 		bool merged = p->expanding;
 		size_t P = 0;

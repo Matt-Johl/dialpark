@@ -761,8 +761,12 @@ public struct AudioContinuity: Sendable {
     public var wishMin: Int32 = 0
     public var wishMax: Int32 = 0
     // Lab playout engine (replaces aubuf): time-scaling and concealment
-    public var poAccelMs: Int = 0      // removed by pitch-synchronous compression (not discarded)
-    public var poStretchMs: Int = 0    // added by stretching
+    public var poAccelMs: Int = 0      // removed by pitch-synchronous compression of speech (not discarded)
+    public var poAccelQuietMs: Int = 0 // removed from blocks below the silence threshold
+    public var poStretchMs: Int = 0    // added by stretching speech
+    public var poStretchQuietMs: Int = 0
+    public var poGateRefused: Int = 0  // speech blocks the correlation gate refused to scale
+    public var poGatePassed: Int = 0
     public var poConcealMs: Int = 0    // concealed from history (underrun or loss)
     public var poZeroMs: Int = 0       // silence with nothing to conceal from
     public var poLate: Int = 0         // packets behind the playout position
@@ -783,7 +787,7 @@ public struct AudioContinuity: Sendable {
     }
 
     public var line: String {
-        "removed_ms=\(removedMs) first_read_ms=\(firstReadMs) jbuf_drop_ms=\(jbufDropMs) ajb_skip_ms=\(ajbSkipMs) overrun_ms=\(overrunMs) inserted_ms=\(insertedMs) underruns=\(underruns) jb_late=\(jbLate) wish=\(wishMin)-\(wishMax) events=\(events.count) first_removed_at_ms=\(firstRemovedAtMs < 0 ? "none" : String(Int(firstRemovedAtMs))) po_accel_ms=\(poAccelMs) po_stretch_ms=\(poStretchMs) po_conceal_ms=\(poConcealMs) po_zero_ms=\(poZeroMs) po_late=\(poLate) po_target=\(poTargetMin)-\(poTargetMax)"
+        "removed_ms=\(removedMs) first_read_ms=\(firstReadMs) jbuf_drop_ms=\(jbufDropMs) ajb_skip_ms=\(ajbSkipMs) overrun_ms=\(overrunMs) inserted_ms=\(insertedMs) underruns=\(underruns) jb_late=\(jbLate) wish=\(wishMin)-\(wishMax) events=\(events.count) first_removed_at_ms=\(firstRemovedAtMs < 0 ? "none" : String(Int(firstRemovedAtMs))) po_accel_ms=\(poAccelMs) po_accel_quiet_ms=\(poAccelQuietMs) po_stretch_ms=\(poStretchMs) po_stretch_quiet_ms=\(poStretchQuietMs) po_gate=\(poGateRefused)/\(poGatePassed) po_conceal_ms=\(poConcealMs) po_zero_ms=\(poZeroMs) po_late=\(poLate) po_target=\(poTargetMin)-\(poTargetMax)"
     }
 
     public static func summary(of events: [AudioEvent]) -> AudioContinuity {
@@ -806,7 +810,10 @@ public struct AudioContinuity: Sendable {
                     if w > c.wishMax { c.wishMax = w }
                 }
             case "PO_ACCEL": c.poAccelMs += Int(e.a)
+            case "PO_ACCEL_Q": c.poAccelQuietMs += Int(e.a)
             case "PO_PREEMPT": c.poStretchMs += Int(e.a)
+            case "PO_PREEMPT_Q": c.poStretchQuietMs += Int(e.a)
+            case "PO_GATE": c.poGateRefused = Int(e.a); c.poGatePassed = Int(e.b)
             case "PO_EXPAND": c.poConcealMs += Int(e.a)
             case "PO_ZEROS": c.poZeroMs += Int(e.a)
             case "PO_LATE": c.poLate += 1

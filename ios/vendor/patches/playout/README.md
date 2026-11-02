@@ -17,6 +17,7 @@ WebRTC's NetEq, which is how the industry handles the same problem:
 | below target | nothing | inserts one pitch period per read (preemptive expand) |
 | underrun | writes zeros, then refills to 40 ms | conceals by repeating the last pitch period with decay, merges real audio back with a cross-fade, and does not advance the timeline (late audio plays, delay grows, acceleration brings it back) |
 | loss (hole with later audio present) | zeros | concealed and skipped; the codec's own PLC/FEC still runs first (aureceiver's lost-frame patch) |
+| pitch search | n/a | lag searched at 4 kHz (NetEq), refined at the full rate; the gate reads the full-rate correlation |
 | where correction happens | any frame | only a stationary, voiced block (normalised correlation of the two periods ≥ 0.9, NetEq's criterion) or a quiet one; unvoiced and transient speech is played as is and the excess waits for a pause or a vowel |
 | rate of correction | one skip per render buffer, no limit | 10 % of read time in speech, one period at most per operation, 50 ms at least between operations (NetEq's timescale countdown); unlimited in silence; ≥ 200 ms above target the 10 % budget is lifted, the gap stays |
 | target | reorder-driven jitter buffer wish + adaptive play buffer | a high quantile of arrival lateness relative to the fastest recent packet, plus one packet; up at once, down one packet at a time; bumped on an underrun |
@@ -55,7 +56,7 @@ Plain C99, one lock, no dependencies, mono S16LE at the player's rate.
 `src/aureceiver.c`:
 1. `#include "playout.h"` after `core.h`.
 2. `struct playout *po;` next to `struct aubuf *aubuf;`; `playout_free` in the destructor.
-3. `aurecv_po_event`: the engine's events onto the continuity ring (`AU_EV_PO_*`, declared by `apply-re.sh` in `re_tmr.h`; `PO_ACCEL_Q`/`PO_PREEMPT_Q` are the quiet-block variants with the block's RMS in b).
+3. `aurecv_po_event`: the engine's events onto the continuity ring (`AU_EV_PO_*`, declared by `apply-re.sh` in `re_tmr.h`; `PO_ACCEL_Q`/`PO_PREEMPT_Q` are the quiet-block variants with the block's RMS in b; `PO_GATE` a=speech blocks refused by the correlation gate, b=passed, every 25 refusals).
 4. `aurecv_push_aubuf`: allocate the engine on the first decoded frame from `cfg->buffer.min/max` (ms), the frame's post-filter sample rate and `ar->ptime`; write each frame with `playout_write(pcm, sampc, ts_samples, now_us)` where `ts_samples = af.timestamp * srate / AUDIO_TIMEBASE`; a late packet is a statistic, not an error; `stats.latency` from `playout_stats().level_ms`.
 5. SSRC change (`flush`) and `aurecv_flush` also `playout_flush`.
 6. `aurecv_read`: the player pulls `playout_read(af->sampv, af->sampc, now_us)`; the engine has its own lock, `aubuf_mtx` only guards the pointer.

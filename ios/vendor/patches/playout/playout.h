@@ -48,6 +48,8 @@ struct playout_stats {
 	uint32_t late_packets;    /* arrived behind the playout position, dropped */
 	uint64_t overflow_ms;     /* oldest audio skipped because the ring was full */
 	uint32_t ops_accelerate, ops_preemptive, ops_expand, ops_merge;
+	uint32_t gate_refused;    /* speech blocks wanted for scaling, refused by the correlation gate */
+	uint32_t gate_passed;     /* speech blocks that passed it */
 	uint32_t target_ms;       /* current target delay */
 	uint32_t level_ms;        /* audio buffered ahead of the playout position */
 	uint32_t max_level_ms;    /* high-water mark of level_ms */
@@ -80,6 +82,8 @@ void playout_set_event_handler(struct playout *p, playout_event_h *h, void *arg)
  * the rate rule); "accelerate-quiet" / "preemptive-quiet" a=ms b=the
  * block's RMS (a block below SILENCE_RMS, scaled at full rate);
  * "expand" a=ms concealed b=level_ms; "zeros" a=ms; "merge";
- * "late" a=samples behind; "target" a=old b=new (ms); "flush". */
+ * "late" a=samples behind; "target" a=old b=new (ms); "flush";
+ * "gate" a=speech blocks refused by the correlation gate so far, b=passed
+ * (lab, every 25 refusals). */
 
 #endif

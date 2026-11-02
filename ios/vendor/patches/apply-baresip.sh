@@ -168,6 +168,7 @@ static void aurecv_po_event(const char *kind, int32_t a, int32_t b, void *arg)
 	else if (!strcmp(kind, "overflow")) k = AU_EV_PO_OVERFLOW;
 	else if (!strcmp(kind, "accelerate-quiet")) k = AU_EV_PO_ACCEL_Q;
 	else if (!strcmp(kind, "preemptive-quiet")) k = AU_EV_PO_PREEMPT_Q;
+	else if (!strcmp(kind, "gate")) k = AU_EV_PO_GATE;
 	if (k != AU_EV_NONE)
 		au_ev_push(k, a, b);
 }
@@ -179,6 +180,10 @@ patch_insert "$SRC/src/aureceiver.c" 'aurecv_po_event' "$T/a4" "$T/n4" before
 if ! grep -q 'accelerate-quiet' "$SRC/src/aureceiver.c"; then
   perl -0pi -e 's/(\telse if \(!strcmp\(kind, "overflow"\)\) k = AU_EV_PO_OVERFLOW;\n)/$1\telse if (!strcmp(kind, "accelerate-quiet")) k = AU_EV_PO_ACCEL_Q;\n\telse if (!strcmp(kind, "preemptive-quiet")) k = AU_EV_PO_PREEMPT_Q;\n/' "$SRC/src/aureceiver.c"
   grep -q 'accelerate-quiet' "$SRC/src/aureceiver.c" || { echo "patch: aureceiver.c quiet kinds anchor not found"; exit 1; }
+fi
+if ! grep -q '"gate"' "$SRC/src/aureceiver.c"; then
+  perl -0pi -e 's/(\telse if \(!strcmp\(kind, "preemptive-quiet"\)\) k = AU_EV_PO_PREEMPT_Q;\n)/$1\telse if (!strcmp(kind, "gate")) k = AU_EV_PO_GATE;\n/' "$SRC/src/aureceiver.c"
+  grep -q '"gate"' "$SRC/src/aureceiver.c" || { echo "patch: aureceiver.c gate kind anchor not found"; exit 1; }
 fi
 # push: allocate the engine on the first frame, write frames to it
 cat > "$T/a5" <<'EOF'

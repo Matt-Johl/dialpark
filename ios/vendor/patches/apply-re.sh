@@ -336,4 +336,12 @@ if ! grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/src/tmr/tmr.c"; then
   perl -0pi -e 's/(\tcase AU_EV_PO_OVERFLOW:   return "PO_OVERFLOW";\n)/$1\tcase AU_EV_PO_ACCEL_Q:    return "PO_ACCEL_Q";\n\tcase AU_EV_PO_PREEMPT_Q:  return "PO_PREEMPT_Q";\n/' "$SRC/src/tmr/tmr.c"
   grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/src/tmr/tmr.c" || { echo "patch: tmr.c quiet names anchor not found"; exit 1; }
 fi
+if ! grep -q 'AU_EV_PO_GATE' "$SRC/include/re_tmr.h"; then
+  perl -0pi -e 's/(\tAU_EV_PO_PREEMPT_Q,[^\n]*\n)/$1\tAU_EV_PO_GATE,       \/* playout: a=speech blocks refused by the correlation gate, b=passed *\/\n/' "$SRC/include/re_tmr.h"
+  grep -q 'AU_EV_PO_GATE' "$SRC/include/re_tmr.h" || { echo "patch: re_tmr.h gate kind anchor not found"; exit 1; }
+fi
+if ! grep -q 'AU_EV_PO_GATE' "$SRC/src/tmr/tmr.c"; then
+  perl -0pi -e 's/(\tcase AU_EV_PO_PREEMPT_Q:  return "PO_PREEMPT_Q";\n)/$1\tcase AU_EV_PO_GATE:       return "PO_GATE";\n/' "$SRC/src/tmr/tmr.c"
+  grep -q 'AU_EV_PO_GATE' "$SRC/src/tmr/tmr.c" || { echo "patch: tmr.c gate name anchor not found"; exit 1; }
+fi
 echo "   re: lab playout event kinds present"
