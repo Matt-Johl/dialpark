@@ -30,7 +30,7 @@ Plain C99, one lock, no dependencies, mono S16LE at the player's rate.
 - `playout.h`, `playout.c` — the engine. Copied into `baresip/src/` by
   `build-baresip.sh apply_patches` and added to `CMakeLists.txt` by
   `apply-baresip.sh`.
-- `test/playout_test.c` — 30 scenario tests, `make lab-playout-test`:
+- `test/playout_test.c` — 34 scenario tests, `make lab-playout-test`:
   nominal (bit-exact at 8/16/48 kHz, 20 ms reads; one packet of headroom
   built once for unaligned 512/1024-sample reads; 5 minutes), start
   backlogs of 8/15/30 packets, stalls of 60/100/150/300 ms, Wi-Fi bunching

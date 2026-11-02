@@ -368,26 +368,27 @@ static void scenario_nominal(uint32_t srate, size_t read_n, int kind, double sec
 }
 
 /* The start-of-call backlog: the first `burst` packets arrive together. */
-static void scenario_backlog(size_t burst)
+static void scenario_backlog_at(size_t burst, uint32_t srate)
 {
-	size_t n, found, frames;
+	struct playout_cfg cfg = { srate, 20, 400, PTIME_MS };
+	size_t n, found, frames, read_n = srate * PTIME_MS / 1000;
 	double removed, added, ratio;
-	int16_t *src = make_signal(48000, SECONDS_DEFAULT, 0, &n);
-	struct script sc = script_alloc(n / (48000 * PTIME_MS / 1000));
+	int16_t *src = make_signal(srate, SECONDS_DEFAULT, 0, &n);
+	struct script sc = script_alloc(n / read_n);
 	struct run r;
 	char name[64];
 	frames = sc.n;
 	for (size_t i = 0; i < burst && i < frames; i++)
 		sc.pk[i].arrival_us = 300000 + (int64_t)burst * PTIME_MS * 1000; /* all at the time the last one would have come */
-	r = simulate(src, n, 48000, &sc, 960, &cfg48, 0);
-	snprintf(name, sizeof(name), "backlog %zu packets", burst);
+	r = simulate(src, n, srate, &sc, read_n, &cfg, 0);
+	snprintf(name, sizeof(name), "backlog %zu packets %uHz", burst, srate);
 	report(name, &r);
-	judge_clicks(&r, 48000, 0, &removed, &added, &found);
-	if (wav_out) write_wav(wav_out, r.out, r.out_n, 48000);
+	judge_clicks(&r, srate, 0, &removed, &added, &found);
+	if (wav_out) write_wav(wav_out, r.out, r.out_n, srate);
 	{
-		size_t n2; int16_t *pure = make_signal(48000, SECONDS_DEFAULT, 2, &n2);
-		struct run r2 = simulate(pure, n2, 48000, &sc, 960, &cfg48, 0);
-		ratio = tone_step_ratio(r2.out, r2.out_n, 48000);
+		size_t n2; int16_t *pure = make_signal(srate, SECONDS_DEFAULT, 2, &n2);
+		struct run r2 = simulate(pure, n2, srate, &sc, read_n, &cfg, 0);
+		ratio = tone_step_ratio(r2.out, r2.out_n, srate);
 		free(pure); free(r2.out);
 	}
 	printf("   clicks found=%zu of %d, spacing removed=%.0fms added=%.0fms, max step ratio=%.2f at %.0f ms\n", found, (int)(SECONDS_DEFAULT * 1000 / CLICK_MS) - 1, removed, added, ratio, step_at_ms);
@@ -417,6 +418,7 @@ static void scenario_backlog(size_t burst)
 	}
 	free(src); free(sc.pk); free(r.out);
 }
+static void scenario_backlog(size_t burst) { scenario_backlog_at(burst, 48000); }
 
 /* Packets held for hold_ms at second 5 (and 12), then released at once. */
 static void scenario_stall(int hold_ms, int kind)
@@ -652,21 +654,24 @@ static void scenario_noise_backlog(size_t burst)
 
 /* Tone and noise alternating with no pause: the backlog is taken out of
  * the tone (voiced) at the gentle rate, never out of the noise. */
-static void scenario_mixed_backlog(size_t burst)
+static void scenario_mixed_backlog_at(size_t burst, uint32_t srate)
 {
-	size_t n, at, seg, frames;
-	int16_t *src = make_signal(48000, 12.0, 4, &n);
-	struct script sc = script_alloc(n / (48000 * PTIME_MS / 1000));
+	struct playout_cfg cfg = { srate, 20, 400, PTIME_MS };
+	size_t n, at, seg, frames, read_n = srate * PTIME_MS / 1000;
+	int16_t *src = make_signal(srate, 12.0, 4, &n);
+	struct script sc = script_alloc(n / read_n);
 	struct run r;
+	char name[64];
 	frames = sc.n;
 	for (size_t i = 0; i < burst && i < frames; i++)
 		sc.pk[i].arrival_us = 300000 + (int64_t)burst * PTIME_MS * 1000;
-	r = simulate(src, n, 48000, &sc, 960, &cfg48, 0);
-	report("mixed backlog (no pause)", &r);
-	if (wav_out) write_wav(wav_out, r.out, r.out_n, 48000);
+	r = simulate(src, n, srate, &sc, read_n, &cfg, 0);
+	snprintf(name, sizeof(name), "mixed backlog (no pause) %uHz", srate);
+	report(name, &r);
+	if (wav_out) write_wav(wav_out, r.out, r.out_n, srate);
 	for (seg = 0; seg < 6; seg++) {
-		size_t from = (size_t)(48000 * (seg * 2.0 + 1.0)) + 2400, len = 48000 - 4800; /* 50 ms inside the segment: the fades at its edges belong to the tone */
-		CHECK(segment_exact(&r, src, from, len, &at), "noise %zu-%zu s is played sample-exact, found at %.0f ms", seg * 2 + 1, seg * 2 + 2, at * 1000.0 / 48000);
+		size_t from = (size_t)(srate * (seg * 2.0 + 1.0)) + srate / 20, len = srate - srate / 10; /* 50 ms inside the segment: the fades at its edges belong to the tone */
+		CHECK(segment_exact(&r, src, from, len, &at), "noise %zu-%zu s is played sample-exact, found at %.0f ms", seg * 2 + 1, seg * 2 + 2, at * 1000.0 / srate);
 	}
 	CHECK(r.st.accelerate_ms + r.st.target_ms + 2 * PTIME_MS >= burst * PTIME_MS, "the backlog was taken out of the tone (%llu ms of %zu)", (unsigned long long)r.st.accelerate_ms, burst * PTIME_MS);
 	CHECK(judge_rate(&r) == 0, "one period at most per operation, 50 ms at least between operations");
@@ -674,6 +679,7 @@ static void scenario_mixed_backlog(size_t burst)
 	CHECK(r.st.expand_ms == 0 && r.st.late_packets == 0, "nothing concealed, nothing dropped");
 	free(src); free(sc.pk); free(r.out);
 }
+static void scenario_mixed_backlog(size_t burst) { scenario_mixed_backlog_at(burst, 48000); }
 
 /* Below target (a 200 ms floor against a 20-40 ms level): stretching
  * follows the same criterion. Noise is never stretched (sample-exact) and
@@ -728,6 +734,10 @@ int main(int argc, char **argv)
 	RUN("backlog-30", scenario_backlog(30));
 	RUN("noise-backlog", scenario_noise_backlog(15));
 	RUN("mixed-backlog", scenario_mixed_backlog(10));
+	RUN("backlog-15-16k", scenario_backlog_at(15, 16000));
+	RUN("backlog-15-8k", scenario_backlog_at(15, 8000));
+	RUN("mixed-backlog-16k", scenario_mixed_backlog_at(10, 16000));
+	RUN("mixed-backlog-8k", scenario_mixed_backlog_at(10, 8000));
 	RUN("floor-noise", scenario_floor(3));
 	RUN("floor-tone", scenario_floor(2));
 	RUN("stall-60", scenario_stall(60, 0));

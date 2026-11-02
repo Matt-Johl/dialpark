@@ -188,7 +188,7 @@ Bench (harness phones, click-train detector on the recording):
 | stall 60 ms ×2 | 36 ms removed, 40 ms inserted | 0 removed, 40 ms inserted (the wait itself) |
 | quiet 60 s | 0 / 0 | 12 ms compressed at start, one 20 ms wait |
 
-Unit scenarios (`make lab-playout-test`): 30, all pass; nominal paths bit-exact.
+Unit scenarios (`make lab-playout-test`): 34, all pass; nominal paths bit-exact.
 Regression with the engine in the harness phones: harness-trunk (all
 scenarios), harness-delayed-offer, harness-call pass.
 
