@@ -191,12 +191,22 @@ def best_lag(ref_frames: list, rec_frames: list, max_lag: int) -> tuple:
 
 
 def gaps(ref_frames: list, rec_frames: list, lag: int) -> list:
-    """Lengths (ms) of silent runs inside the reference's bursts, shifted."""
+    """Lengths (ms) of silent runs inside the reference's bursts, shifted.
+
+    Only bursts that lie fully inside the recorded AUDIO count: the recorder
+    runs on past the hang-up, so a burst the hang-up cuts short is zeros
+    from there, which read as a gap (the delayed-offer PCMU call ended at
+    8.04 s one run and 8.06 s the next, inside a burst whose window ran to
+    8.05 s: 3 failures in 8 runs on unchanged code, 2026-11-02)."""
     found = []
+    peak = max(rec_frames) if rec_frames else 0.0
+    audio_end = len(rec_frames)
+    while audio_end > 0 and rec_frames[audio_end - 1] <= 0.2 * peak:
+        audio_end -= 1
     for start, end in bursts(ref_frames):
         lo, hi = start + lag + EDGE_FRAMES, end + lag - EDGE_FRAMES
-        if hi - lo < 5 or hi > len(rec_frames):
-            continue  # burst not (fully) inside the recording
+        if hi - lo < 5 or hi > audio_end:
+            continue  # burst not (fully) inside the recorded audio
         window = rec_frames[lo:hi]
         level = sorted(window)[len(window) // 2]
         if level <= 0:
