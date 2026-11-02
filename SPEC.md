@@ -210,7 +210,19 @@ are already implemented — do not remove them because remote reach is deferred.
    permanent (README, "The SIP domain").
 3. App-leg media **always relays through the server**. ICE/TURN may be added
    later as an optimisation; the relay path is the baseline and must exist from
-   Phase 0.
+   Phase 0. *2026-11-02:* the relay starts when the callee answers (its
+   200 OK is forwarded and the pumps run at once), not when the caller's
+   ACK arrives — the ACK confirms the dialog (RFC 3261 §13.3.1.4), it is
+   not a media gate, and every exchange bridges media on the answer.
+   Waiting for it held the callee's first 230–320 ms of audio in the
+   server's socket on app calls and released it as one burst the phone's
+   play buffer discarded (the cut opening of every call, 2026-10-31). A
+   delayed-offer caller is the one exception: its answer is in the ACK. A
+   caller that never ACKs has the call ended with BYE at 64×T1. The
+   `bridged` line logs `answer_to_relay_ms`, `call ended` the ACK's
+   `ack_ms` and each pump's `backlog_pkts` (packets already queued when
+   the relay started); `make harness-slow-ack` holds a caller's ACK back
+   500 ms and requires the relay to have started regardless.
 4. **SRTP mandatory.** *Done 2026-09-13 (plan Phase F):* SDES SRTP
    (AES_CM_128_HMAC_SHA1_80) on every app-leg media session — the server
    offers and answers RTP/SAVP with `a=crypto` on the TLS transport

@@ -70,6 +70,11 @@ type bridgedCall struct {
 	// that the call is over.
 	gone     chan struct{}
 	goneOnce sync.Once
+	// When the callee answered, and how long the caller's ACK took after
+	// our 200 OK (-1: it never came, or the 200 OK failed; 0: a delayed
+	// offer, whose answer path waits for the ACK). For the call-ended line.
+	answered time.Time
+	ackMs    atomic.Int64
 }
 
 func newBridgedCall(s *Server, log *slog.Logger, callID string, a, b *callLeg) *bridgedCall {
@@ -377,7 +382,7 @@ func (c *bridgedCall) wait() {
 			c.s.waker.ForgetWake(dev, c.callID)
 		}
 	}
-	c.log.Info("call ended", "relay", strings.Join(summary, " | "))
+	c.log.Info("call ended", "relay", strings.Join(summary, " | "), "ack_ms", c.ackMs.Load())
 }
 
 // onRefer is the OnRefer hook for a leg: the party on `from` asked us to

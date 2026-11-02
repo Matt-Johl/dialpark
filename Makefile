@@ -146,6 +146,13 @@ harness-cancel-before-answer:
 harness-delayed-offer:
 	sh harness/delayed_offer_test.sh
 
+# The relay starts at the callee's answer, not at the caller's ACK (SPEC
+# §4.4 rule 3, 2026-11-02): SIPp as the exchange calls app 211 and holds
+# its ACK back 500 ms; the relay must have run regardless, with no backlog
+# and nothing removed from the app's recording.
+harness-slow-ack:
+	sh harness/slow_ack_test.sh
+
 # The same with Opus: the PBX answers Opus at its own payload type (114,
 # CUCM's choice, against our 96) and the relay must send with that number.
 harness-delayed-offer-opus:
@@ -226,12 +233,14 @@ harness-regression:
 	for t in harness-call harness-wake harness-qos \
 	         harness-trunk harness-trunk-srtp harness-trunk-tls harness-trunk-secure \
 	         harness-trunk-stall harness-pbx-hold harness-pbx-unavailable \
-	         harness-hold-music harness-cancel-before-answer harness-delayed-offer harness-delayed-offer-opus harness-dtmf \
+	         harness-hold-music harness-cancel-before-answer harness-delayed-offer harness-delayed-offer-opus harness-slow-ack harness-dtmf \
 	         harness-admin harness-admin-ui harness-licence \
 	         harness-pbx-lines harness-pbx-outage; do \
 	  echo "=== $$t"; $(MAKE) $$t || { echo "REGRESSION FAILED: $$t"; exit 1; }; \
 	done; \
 	echo "=== NARROWBAND=1 harness-trunk"; NARROWBAND=1 sh harness/trunk_test.sh || exit 1; \
+	echo "=== CLICKS=1 harness-call"; CLICKS=1 sh harness/call_test.sh || exit 1; \
+	echo "=== CLICKS=1 harness-trunk"; CLICKS=1 sh harness/trunk_test.sh || exit 1; \
 	echo "=== DIRECTION=xfer-app harness-trunk"; DIRECTION=xfer-app sh harness/trunk_test.sh || exit 1; \
 	echo "=== LINES=1 harness-dtmf"; LINES=1 sh harness/dtmf_test.sh || exit 1; \
 	echo "ALL PBX-LEG TESTS PASS"

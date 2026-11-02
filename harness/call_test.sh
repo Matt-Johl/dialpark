@@ -33,10 +33,23 @@ NOPORTS=""
 COMPOSE="docker compose -f $COMPOSE_FILE $NOPORTS $PROFILE"
 NET="${PROJECT}_default"
 
-python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null
+# CLICKS=1: the tone carries a click train (gen_tone.py --clicks) and the
+# callee's recording is also read for audio removed or inserted at the
+# receiving phone (assert_audio.py --continuity, none allowed), with the
+# server's relay required to have started at the answer (SPEC §4.4 rule 3,
+# 2026-11-02: answer_to_relay_ms on bridged, backlog_pkts on call ended).
+CLICKS="${CLICKS:-0}"
+if [ "$CLICKS" = 1 ]; then
+  python3 harness/baresip/media/gen_tone.py --clicks --seconds "$((CALL_SECONDS + 5))" "$MEDIA_DIR/in.wav" >/dev/null
+else
+  python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null
+fi
 rm -f "$MEDIA_DIR"/out-*.wav
 
-cleanup() { [ "$KEEP" = 1 ] || $COMPOSE down -v >/dev/null 2>&1 || true; }
+cleanup() {
+  [ "$KEEP" = 1 ] || $COMPOSE down -v >/dev/null 2>&1 || true
+  [ "$CLICKS" = 1 ] && python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 echo "== up ($COMPOSE_FILE)"
@@ -75,3 +88,20 @@ $COMPOSE logs --no-log-prefix "$PHONE_B" 2>&1 | grep -iE 'Call established|incom
 
 echo "== media"
 python3 harness/spike/assert_audio.py "$MEDIA_DIR/out-212.wav"
+if [ "$CLICKS" = 1 ]; then
+  echo "== continuity: what 212 played (211's clicks)"
+  cont="$(python3 harness/spike/assert_audio.py "$MEDIA_DIR/out-212.wav" --continuity --max-removed-ms 0)" || { printf '%s\n' "$cont" | sed 's/^/   /'; echo "FAIL: audio removed at the receiving phone"; exit 1; }
+  printf '%s\n' "$cont" | sed 's/^/   /'
+  echo "== relay start"
+  slog="$($COMPOSE logs --no-log-prefix "$SERVER" 2>&1)"
+  a2r="$(printf '%s\n' "$slog" | grep 'msg=bridged' | tail -1 | grep -o 'answer_to_relay_ms=[0-9-]*' | cut -d= -f2)"
+  [ -n "$a2r" ] && [ "$a2r" -lt 50 ] || { echo "FAIL: answer_to_relay_ms=${a2r:-missing}, want under 50"; exit 1; }
+  echo "   relay started ${a2r} ms after the callee answered"
+  for b in $(printf '%s\n' "$slog" | grep 'msg="call ended"' | tail -1 | grep -o 'backlog_pkts=[0-9]*' | cut -d= -f2); do
+    # the harness phone itself sends its first three packets as a burst
+    # (early_max_ms=35 on every answer), so up to four; a relay that
+    # waited for the caller's ACK finds 12 or more
+    [ "$b" -le 4 ] || { echo "FAIL: a pump found $b packets queued when it started"; exit 1; }
+  done
+  echo "   no backlog at either pump's start"
+fi
