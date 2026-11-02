@@ -342,8 +342,9 @@ if [ -n "${OUTBOUND:-}" ] && [ -z "${REFUSED:-}" ] && [ "$OUTBOUND" != echo ] &&
 fi
 if [ -n "${CALLEE_ANSWER_MS:-}" ]; then
   echo "== prepared units (outgoing): were the audio units built while the far end rang, and adopted at the answer?"
-  # Each line of the sim's log starts with the seconds since launch.
-  at() { grep "$1" "$OUT" | head -1 | awk '{print $1}'; }
+  # The sim's timestamped lines start with the seconds since launch (the
+  # driver's own lines appear once more without one, so only those count).
+  at() { grep -E "^ *[0-9]+\.[0-9]+ .*$1" "$OUT" | head -1 | awk '{print $1}'; }
   prepared="$(at 'audiounit: prepared player and record units')"
   answered="$(at 'Call answered')"
   established="$(at 'Call established')"
