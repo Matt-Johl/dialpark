@@ -577,6 +577,16 @@ public final class BaresipCallEngine: CallEngine {
         audio_source            \(audioSource ?? "audiounit,default")
         audio_alert             none
 
+        # The devices run at the hardware's own format, 48 kHz mono, for
+        # every codec; baresip resamples between codec and device. Pinned
+        # so the audiounit driver can prepare its units before a call is
+        # answered (ios/vendor/patches/audiounit/sess.c) and every call
+        # adopts them, whatever codec it negotiated.
+        auplay_srate            48000
+        ausrc_srate             48000
+        auplay_channels         1
+        ausrc_channels          1
+
         # Playout: an adaptive jitter buffer of 2–8 frames (40–160 ms at
         # 20 ms) instead of the fixed default 5–10 (100–200 ms), which was
         # most of the mouth-to-ear budget; the play buffer adapts likewise,

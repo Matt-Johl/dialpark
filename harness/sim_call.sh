@@ -118,6 +118,13 @@ if [ -n "${OUTBOUND:-}" ] && [ "$OUTBOUND" != echo ] && [ "$OUTBOUND" != 600 ]; 
   # (echo / 600 need no callee: the server or the PBX answers.)
   echo "== phone-b (212) must be registered (callee)"
   MARK="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # CALLEE_ANSWER_MS=<ms>: phone-b rings for that long before the script
+  # accepts the call for it, instead of auto-answering ~50 ms after the
+  # INVITE. Long enough for CallKit's activation (ACTIVATE_MS) and the
+  # driver's preparation of its units to finish while the far end rings —
+  # the outgoing call as a person makes it — so the answer must adopt the
+  # prepared units (asserted below).
+  [ -z "${CALLEE_ANSWER_MS:-}" ] || export BARESIP_B_ANSWER_MODE=manual
   if [ "$SERVER" = native ]; then
     BARESIP_B_OUTBOUND="$HOST:5061" $C up -d --no-deps --force-recreate baresip-b >/dev/null 2>&1
     sleep 4
@@ -241,6 +248,16 @@ n=1
 while :; do
   if [ -n "${OUTBOUND:-}" ]; then
     echo "   (outbound: the simulated phone dials $OUTBOUND)"
+    if [ -n "${CALLEE_ANSWER_MS:-}" ]; then
+      i=0
+      until grep -q 'far end ringing' "$OUT"; do
+        i=$((i+1)); [ $i -le 30 ] || { echo "FAIL: the far end never rang"; exit 1; }
+        sleep 1
+      done
+      sleep "$(awk -v ms="$CALLEE_ANSWER_MS" 'BEGIN{printf "%.2f", ms/1000}')"
+      echo "   phone-b accepts after ${CALLEE_ANSWER_MS} ms of ringing"
+      ctl '{"command":"accept"}'
+    fi
   else
     ctl '{"command":"dial","params":"203@dialpark"}'
   fi
@@ -322,6 +339,22 @@ if [ -n "${OUTBOUND:-}" ] && [ -z "${REFUSED:-}" ] && [ "$OUTBOUND" != echo ] &&
   else
     echo "   PASS: ring-back played on a session CallKit had already activated, and stopped on the answer"
   fi
+fi
+if [ -n "${CALLEE_ANSWER_MS:-}" ]; then
+  echo "== prepared units (outgoing): were the audio units built while the far end rang, and adopted at the answer?"
+  # Each line of the sim's log starts with the seconds since launch.
+  at() { grep "$1" "$OUT" | head -1 | awk '{print $1}'; }
+  prepared="$(at 'audiounit: prepared player and record units')"
+  answered="$(at 'Call answered')"
+  established="$(at 'Call established')"
+  started="$(at 'audiounit: started')"
+  grep -E 'audiounit: (prepared|player|record|started|unit ready)' "$OUT" | grep -v '^  baresip:' | sed 's/^/   /'
+  [ -n "$prepared" ] || { echo "FAIL: the driver never prepared its units while the far end rang"; exit 1; }
+  [ -n "$answered" ] && awk -v p="$prepared" -v a="$answered" 'BEGIN{exit !(p < a)}' || { echo "FAIL: the units were prepared at ${prepared}s, after the answer at ${answered}s"; exit 1; }
+  grep -q 'audiounit: player adopted the prepared unit' "$OUT" || { echo "FAIL: the answer did not adopt the prepared player unit"; exit 1; }
+  ms="$(awk -v e="$established" -v s="$started" 'BEGIN{printf "%.0f", (s-e)*1000}')"
+  [ -n "$established" ] && [ -n "$started" ] && [ "$ms" -le 100 ] || { echo "FAIL: the units started ${ms:-?} ms after the call was established, want within 100 ms"; exit 1; }
+  echo "   PASS: units prepared at ${prepared}s while ringing, adopted at the answer (${answered}s), running ${ms} ms after established"
 fi
 if [ -n "${REFUSED:-}" ]; then
   echo "== refused call (plan Phase J): tone first, then the call disappears"

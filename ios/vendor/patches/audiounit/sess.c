@@ -14,6 +14,15 @@
  *    didDeactivate) is remembered even while no units exist.
  *  - Frame counters on both callbacks, so a probe or the app can assert
  *    that CoreAudio is actually delivering audio.
+ *  - Prepared units (2026-11-02): when the host releases the audio while
+ *    no client exists — an outgoing call, where CallKit activates the
+ *    session at dial time and the far end is still ringing — a player
+ *    and a record unit are created and initialised then, so the answer
+ *    only binds and starts them. Creating the voice-processing units
+ *    took ~200 ms inside the 200 OK's handling, during which the loop
+ *    read no RTP and the far end's opening queued (SPEC §4.4 rule 3). A
+ *    hold discards them (the session is going away); a client whose
+ *    format differs sets up afresh and the prepared unit is discarded.
  */
 #include <AudioUnit/AudioUnit.h>
 #include <stdatomic.h>
@@ -41,6 +50,13 @@ static struct audiosess *gas;
 /* Dialler: host hold state, deferred-start timer, frame counters. */
 static bool audiosess_hold = false;
 static struct tmr start_tmr;
+
+/* Prepared units: created and initialised, bound to nobody, not started. */
+static struct {
+	AudioUnit play;
+	AudioUnit rec;
+	struct audiounit_fmt fmt;
+} prepared;
 static atomic_uint_least64_t play_frames;
 static atomic_uint_least64_t rec_frames;
 static atomic_uint_least64_t play_energy; /* sum |sample| of rendered S16 audio */
@@ -115,6 +131,7 @@ int audiosess_alloc(struct audiosess_st **stp,
 static void start_all(void *arg)
 {
 	struct le *le;
+	uint64_t t0 = audiounit_now_us();
 	(void)arg;
 
 	if (audiosess_hold || !gas)
@@ -128,7 +145,113 @@ static void start_all(void *arg)
 			st->inth(false, st->arg);
 	}
 
-	info("audiounit: started %u unit(s)\n", list_count(&gas->sessl));
+	info("audiounit: started %u unit(s) in %llu ms\n",
+	     list_count(&gas->sessl),
+	     (unsigned long long)((audiounit_now_us() - t0) / 1000));
+}
+
+
+static bool have_clients(void)
+{
+	return gas && list_count(&gas->sessl) > 0;
+}
+
+
+/* The format a call will ask for: the device rates and channels the
+ * configuration pins, else what the app's codecs produce (48 kHz mono). */
+static struct audiounit_fmt call_fmt(bool play)
+{
+	const struct config_audio *a = &conf_config()->audio;
+	struct audiounit_fmt f;
+
+	f.srate = play ? a->srate_play : a->srate_src;
+	f.ch    = play ? a->channels_play : a->channels_src;
+	f.fmt   = play ? a->play_fmt : a->src_fmt;
+	if (!f.srate)
+		f.srate = 48000;
+	if (!f.ch)
+		f.ch = 1;
+	return f;
+}
+
+
+static void discard_prepared(const char *why)
+{
+	if (!prepared.play && !prepared.rec)
+		return;
+
+	audiounit_unit_dispose(prepared.play);
+	audiounit_unit_dispose(prepared.rec);
+	prepared.play = prepared.rec = NULL;
+	info("audiounit: prepared units discarded (%s)\n", why);
+}
+
+
+/* The session is active and no call is up: build the units a call will
+ * need, so its answer only binds and starts them. */
+static void prepare(void)
+{
+	struct audiounit_fmt pf = call_fmt(true), rf = call_fmt(false);
+	uint64_t t0 = audiounit_now_us();
+	OSStatus ret;
+
+	if (prepared.play || prepared.rec)
+		return;
+	if (!audiounit_fmt_equal(&pf, &rf)) {
+		info("audiounit: player and record formats differ; "
+		     "not preparing units\n");
+		return;
+	}
+
+	ret = audiounit_player_create(&pf, &prepared.play);
+	if (!ret)
+		ret = audiounit_recorder_create(&rf, &prepared.rec);
+	if (ret) {
+		/* The session can be live and in flux at the same instant
+		 * (CallKit swapping calls); the call sets up afresh then. */
+		warning("audiounit: preparing units failed: %d (%c%c%c%c); "
+			"the call will set up afresh\n", ret,
+			ret>>24, ret>>16, ret>>8, ret);
+		audiounit_unit_dispose(prepared.play);
+		prepared.play = NULL;
+		return;
+	}
+	prepared.fmt = pf;
+	info("audiounit: prepared player and record units in %llu ms "
+	     "(%u Hz, %u ch; session active, no call yet)\n",
+	     (unsigned long long)((audiounit_now_us() - t0) / 1000),
+	     pf.srate, pf.ch);
+}
+
+
+static bool take(AudioUnit *slot, const char *what,
+		 const struct audiounit_fmt *f, AudioUnit *aup)
+{
+	if (!*slot)
+		return false;
+	if (!audiounit_fmt_equal(f, &prepared.fmt)) {
+		info("audiounit: prepared %s unit is %u Hz %u ch, the call "
+		     "wants %u Hz %u ch; discarded\n", what,
+		     prepared.fmt.srate, prepared.fmt.ch, f->srate, f->ch);
+		audiounit_unit_dispose(*slot);
+		*slot = NULL;
+		return false;
+	}
+	*aup = *slot;
+	*slot = NULL;
+	return true;
+}
+
+
+bool audiosess_take_player(const struct audiounit_fmt *f, AudioUnit *aup)
+{
+	return take(&prepared.play, "player", f, aup);
+}
+
+
+bool audiosess_take_recorder(const struct audiounit_fmt *f, AudioUnit *aup)
+{
+	return take(&prepared.rec, "record", f, aup);
 }
 
 
@@ -162,6 +285,7 @@ void audiosess_interrupt(bool hold)
 
 	if (hold) {
 		tmr_cancel(&start_tmr);
+		discard_prepared("audio held");
 
 		if (!gas)
 			return;
@@ -176,13 +300,17 @@ void audiosess_interrupt(bool hold)
 		return;
 	}
 
-	start_all(NULL);
+	if (have_clients())
+		start_all(NULL);
+	else
+		prepare();
 }
 
 
 void audiosess_close(void)
 {
 	tmr_cancel(&start_tmr);
+	discard_prepared("module close");
 }
 
 
