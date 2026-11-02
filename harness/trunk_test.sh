@@ -79,7 +79,16 @@ DIRECTION="${DIRECTION:-both}"
 CALL_SECONDS="${CALL_SECONDS:-8}"
 KEEP="${KEEP:-0}"
 
-python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null
+# CLICKS=1: the tone carries a click train and each recording is also read
+# for audio removed or inserted at the receiving phone (none allowed), with
+# the server's relay required to have started at the answer (SPEC §4.4 rule
+# 3, 2026-11-02). The plain tone is restored on exit.
+CLICKS="${CLICKS:-0}"
+if [ "$CLICKS" = 1 ]; then
+  python3 harness/baresip/media/gen_tone.py --clicks --seconds "$((CALL_SECONDS + 5))" "$MEDIA_DIR/in.wav" >/dev/null
+else
+  python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null
+fi
 # A silent source for the transfer scenario (same format as the tone).
 python3 - "$MEDIA_DIR/silence.wav" <<'EOF'
 import sys, wave
@@ -89,8 +98,36 @@ with wave.open(sys.argv[1], "wb") as w:
 EOF
 rm -f "$MEDIA_DIR"/out-*.wav
 
-cleanup() { [ "$KEEP" = 1 ] || $COMPOSE down -v >/dev/null 2>&1 || true; }
+cleanup() {
+  [ "$KEEP" = 1 ] || $COMPOSE down -v >/dev/null 2>&1 || true
+  [ "$CLICKS" = 1 ] && python3 harness/baresip/media/gen_tone.py "$MEDIA_DIR/in.wav" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
+
+# continuity_check <scenario> <recording>: with CLICKS=1, nothing removed or
+# inserted at the receiving phone, and the relay started at the answer.
+continuity_check() {
+  [ "$CLICKS" = 1 ] || return 0
+  if cont="$(python3 harness/spike/assert_audio.py "$2" --continuity --max-removed-ms 0)"; then
+    printf '%s\n' "$cont" | sed 's/^/   /'
+    echo "   continuity $1: nothing removed at the receiving phone"
+  else
+    printf '%s\n' "$cont" | sed 's/^/   /'
+    echo "FAIL $1: audio removed at the receiving phone"; fail=1
+  fi
+  slog="$($COMPOSE logs --no-log-prefix --since 60s dialpark 2>&1)"
+  a2r="$(printf '%s\n' "$slog" | grep 'msg=bridged' | tail -1 | grep -o 'answer_to_relay_ms=[0-9-]*' | cut -d= -f2)"
+  if [ -n "$a2r" ] && [ "$a2r" -lt 50 ]; then
+    echo "   relay started ${a2r} ms after the callee answered"
+  else
+    echo "FAIL $1: answer_to_relay_ms=${a2r:-missing}, want under 50"; fail=1
+  fi
+  for b in $(printf '%s\n' "$slog" | grep 'msg="call ended"' | tail -1 | grep -o 'backlog_pkts=[0-9]*' | cut -d= -f2); do
+    # up to four: the harness phone's own three-packet start burst; a
+    # relay that waited for the caller's ACK finds 12 or more
+    [ "$b" -le 4 ] || { echo "FAIL $1: a pump found $b packets queued when it started"; fail=1; }
+  done
+}
 
 echo "== up: server, asterisk, apps 211 and 212, desk phone 100"
 $COMPOSE up --build -d dialpark asterisk >/dev/null 2>&1
@@ -190,6 +227,7 @@ if [ "$DIRECTION" = out ] || [ "$DIRECTION" = both ]; then
     echo "PASS out: the desk phone heard the app through the trunk"
     codec_check out
     srtp_check out callee
+    continuity_check out "$MEDIA_DIR/out-100.wav"
   else
     echo "FAIL out"; fail=1
     $COMPOSE logs --no-log-prefix asterisk 2>&1 | grep -iE "dialpark|100|error|warn|rtp" | tail -8 | sed 's/^/   asterisk: /'
@@ -209,6 +247,7 @@ if [ "$DIRECTION" = in ] || [ "$DIRECTION" = both ]; then
     echo "PASS in: the app heard the desk phone through the trunk"
     codec_check in
     srtp_check in caller
+    continuity_check in "$MEDIA_DIR/out-211.wav"
   else
     echo "FAIL in"; fail=1
     $COMPOSE logs --no-log-prefix asterisk 2>&1 | grep -iE "dialpark|211|error|warn" | tail -8 | sed 's/^/   asterisk: /'

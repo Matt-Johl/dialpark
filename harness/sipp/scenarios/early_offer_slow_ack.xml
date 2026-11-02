@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  An early-offer INVITE from the PBX whose ACK comes late
+  (harness/slow_ack_test.sh). SIPp stands in for the exchange at the
+  server's trunk listener and calls app 211 with the offer in the INVITE,
+  as Asterisk and CUCM do; when the 200 OK comes it waits -key ack_ms
+  milliseconds before ACKing — a slow caller, the shape of an app leg's
+  230-320 ms round trip. The server must bridge media on the answer, not
+  the ACK: run with -rtp_echo, whatever the app sends from its answer comes
+  straight back, and the app's recording shows whether its opening was
+  held in the server's socket for the ACK's duration and released as one
+  burst (the phone's play buffer then discards it) or relayed as it came.
+-->
+<scenario name="early_offer_slow_ack">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:[service]@dialpark SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, NOTIFY
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=pbx 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 0 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-16
+      a=sendrecv
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="1" rrs="true" timeout="30000"/>
+  <!-- The slow caller: the ACK leaves ack_ms after the 200 OK. -key only
+       substitutes inside message text, so the keyword goes through a
+       string variable into a numeric one the pause can read. -->
+  <nop>
+    <action>
+      <assignstr assign_to="ack_str" value="[ack_ms]"/>
+      <todouble assign_to="ack_num" variable="ack_str"/>
+    </action>
+  </nop>
+  <pause variable="ack_num"/>
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <!-- The call: -d milliseconds of the app's tone echoed back to it. -->
+  <pause/>
+  <send retrans="500">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      Max-Forwards: 70
+      From: "Desk 100" <sip:100@[local_ip]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:[service]@dialpark>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:100@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="5000"/>
+</scenario>

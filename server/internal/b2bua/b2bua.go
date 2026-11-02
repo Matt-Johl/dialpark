@@ -1741,6 +1741,7 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 	// The callee answered: answer the caller now with the codec the callee
 	// took (the relay copies encoded audio, so the legs must match), then
 	// complete the callee.
+	calleeAnswered := time.Now()
 	negotiated := media.CodecAudioFromSession(out.Media().MediaSession())
 	log.Info("callee answered", "codec", negotiated.Name, "callee_trunk", l.calleeTrunk, "caller_trunk", l.callerTrunk,
 		"callee_srtp", srtpState(out.Media().MediaSession()))
@@ -1779,13 +1780,23 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 		// type, so digits from this leg arrive as events.
 		answerCodecs = append(answerCodecs, ev)
 	}
-	if err := in.AnswerOptions(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
-		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)}); err != nil {
+	// The relay starts as soon as the caller's 200 OK is out, not when its
+	// ACK comes back. The ACK confirms the dialog (RFC 3261 §13.3.1.4); it
+	// is not a media gate, and every exchange bridges media on the answer.
+	// Waiting for it held the callee's RTP — flowing since ITS 200 OK — in
+	// the socket for the caller's round trip, 230–320 ms on an app leg, and
+	// released it as one burst that the phone's play buffer discarded as
+	// the cut opening of every call (2026-10-31). A delayed-offer caller
+	// still waits: its answer is in the ACK (AnswerStart falls back).
+	acked, err := in.AnswerStart(diago.AnswerOptions{RTPNAT: s.legNAT(l.callerTrunk), Codecs: answerCodecs,
+		OnRefer: call.onRefer(legA), OnMediaUpdate: onMedia(legA)})
+	if err != nil {
 		log.Error("answer caller", "err", err)
 		_ = out.Hangup(out.Context())
 		out.Close()
 		return err
 	}
+	callerAnswered := time.Now()
 	// Same rule the other way round, and only now: a leg's session is not
 	// secure until BOTH crypto contexts exist, and ours is created when we
 	// answer — so asking at INVITE time calls every inbound call insecure,
@@ -1819,7 +1830,36 @@ func (s *Server) bridge(ctx context.Context, log *slog.Logger, in *diago.DialogS
 			legA.codec, legB.codec = got, got
 		}
 	}
-	log.Info("bridged", "dst", dst.String(), "codec", legA.codec.Name, "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()))
+	call.answered = calleeAnswered
+	log.Info("bridged", "dst", dst.String(), "codec", legA.codec.Name, "caller_srtp", srtpState(in.Media().MediaSession()), "callee_srtp", srtpState(out.Media().MediaSession()),
+		"answer_to_relay_ms", time.Since(calleeAnswered).Milliseconds())
+	// The caller's ACK, now in the background. Three outcomes: it arrives
+	// (the usual few ms, logged); the 200 OK could not be written; or
+	// nothing came back and sipgo gave up after 64*T1 — the dialog counts
+	// as confirmed and RFC 3261 §13.3.1.4 says to end it with BYE, which
+	// the old blocking answer never did. Either failure ends both legs.
+	go func() {
+		err, ok := <-acked
+		if !ok {
+			return // a delayed-offer caller: the answer path already waited for the ACK
+		}
+		ackMs := time.Since(callerAnswered).Milliseconds()
+		switch {
+		case err != nil:
+			log.Error("answer caller: the 200 OK failed; ending the call", "err", err)
+		case ackMs >= (64*sip.T1 - sip.T1).Milliseconds():
+			log.Warn("answer caller: no ACK to our 200 OK; ending the call", "waited_ms", ackMs)
+		default:
+			call.ackMs.Store(ackMs)
+			log.Info("caller acked", "ack_ms", ackMs)
+			return
+		}
+		call.ackMs.Store(-1)
+		hctx, hcancel := context.WithTimeout(context.Background(), byeTimeout)
+		defer hcancel()
+		_ = out.Hangup(hctx)
+		_ = in.Hangup(hctx)
+	}()
 
 	// Media relay: our own pumps rather than diago's Bridge, so every leg
 	// reports what it read and wrote — a phone that receives nothing while
@@ -1880,6 +1920,13 @@ const pumpTimelineBreak = 2 * time.Second
 // and dropped the lot. Ten frames is far beyond jitter and well short of
 // what a listener notices.
 const pumpFrozenBreak = 200 * time.Millisecond
+
+// pumpBacklogWindow: packets read this soon after a pump starts were
+// already queued in the socket when it did (a backlog). A paced arrival
+// lands inside the window one time in four (20 ms packets), so a count of
+// 1–2 is a relay that started on time and 12–16 is the caller's round trip
+// queued up (2026-10-31).
+const pumpBacklogWindow = 5 * time.Millisecond
 
 // declineGrace is how long a decline or busy wake_ack waits for the app's
 // own 486 on the INVITE before the server CANCELs it itself (bridge). The
@@ -1956,6 +2003,12 @@ type pump struct {
 	lag         time.Duration
 	frozen      bool
 	frozenBreak time.Duration
+	// Packets found waiting when the relay started: read within the first
+	// pumpBacklogWindow of run. A relay that starts at the answer finds one
+	// or none; one that started at the caller's ACK found the whole round
+	// trip's worth (12–16 on an app leg, 2026-10-31).
+	startedAt time.Time
+	backlog   atomic.Int64
 	// Arrival skew of the source against its own timeline, for the log.
 	skewMs     atomic.Int64
 	earlyMaxMs atomic.Int64
@@ -2026,9 +2079,9 @@ func (p *pump) setPacketPath(rr *media.RTPPacketReader, rw *media.RTPPacketWrite
 }
 
 func (p *pump) String() string {
-	s := fmt.Sprintf("read=%d written=%d write_errs=%d lost=%d reordered=%d jitter_ms=%.1f early_max_ms=%d late_max_ms=%d",
+	s := fmt.Sprintf("read=%d written=%d write_errs=%d lost=%d reordered=%d jitter_ms=%.1f early_max_ms=%d late_max_ms=%d backlog_pkts=%d",
 		p.read.Load(), p.written.Load(), p.writeErrs.Load(), p.lost.Load(), p.reordered.Load(), p.jitterMs(),
-		p.earlyMaxMs.Load(), p.lateMaxMs.Load())
+		p.earlyMaxMs.Load(), p.lateMaxMs.Load(), p.backlog.Load())
 	if ev, dropped := p.events.Load(), p.eventsDropped.Load(); ev > 0 || dropped > 0 {
 		s += fmt.Sprintf(" events=%d events_dropped=%d", ev, dropped)
 	}
@@ -2383,6 +2436,7 @@ func (p *pump) rebaseSeq(srcSeq uint16) {
 func (p *pump) run(ctx context.Context, log *slog.Logger) {
 	buf := make([]byte, media.RTPBufSize)
 	var lastRead, lastWritten int64
+	p.startedAt = time.Now()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	done := make(chan struct{})
@@ -2395,7 +2449,11 @@ func (p *pump) run(ctx context.Context, log *slog.Logger) {
 			}
 			if n > 0 {
 				p.read.Add(1)
-				p.lastReadAt.Store(time.Now().UnixMilli())
+				now := time.Now()
+				p.lastReadAt.Store(now.UnixMilli())
+				if now.Sub(p.startedAt) < pumpBacklogWindow {
+					p.backlog.Add(1)
+				}
 				if p.localOnly.Load() {
 					// Hold music has this stream; what arrives is not
 					// forwarded. Counted as read, not written — which is

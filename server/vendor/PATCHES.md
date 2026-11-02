@@ -137,6 +137,19 @@ upstream release named in `modules.txt`; re-apply when bumping.
   input. Lines mode sets it on every PBX-leg transport so each line's
   REGISTER, INVITE and in-dialog requests leave from that line's port.
 
+- `dialog_server_session.go`: `AnswerStart(AnswerOptions) (<-chan error, error)`
+  answers an early-offer INVITE and returns as soon as the 200 OK is handed
+  to the transaction, delivering the ACK's outcome (or the 64*T1 give-up,
+  or a write error) on the channel; Finalize and the RTCP monitor run on
+  that path. Upstream's AnswerOptions blocks until the ACK, which held the
+  B2BUA's relay back by the caller's round trip (230–320 ms on an app leg)
+  while the callee's RTP queued and was then released as one burst the
+  phone's play buffer discarded (2026-10-31). A delayed-offer INVITE still
+  takes the blocking path (its answer is in the ACK). `Hangup` on a dialog
+  that has sent its 200 OK but not yet seen the ACK sends BYE (sipgo's
+  WriteBye waits for the ACK or the transaction timeout, RFC 3261 §15)
+  instead of a second final response.
+
 ## github.com/emiago/sipgo
 
 - `dialog_client.go` (`inviteCancel`) — cancelling an INVITE watches the

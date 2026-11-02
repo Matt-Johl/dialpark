@@ -208,6 +208,65 @@ func (d *DialogServerSession) AnswerOptions(opt AnswerOptions) error {
 	return d.answerSession(rtpSess)
 }
 
+// AnswerStart answers an early-offer INVITE without waiting for the ACK.
+// Dialler patch. AnswerOptions above writes the 200 OK and then blocks in
+// sipgo until the caller's ACK (retransmitting on T1), which held the
+// B2BUA's relay back by the caller's round trip — 230–320 ms on an app
+// leg — while the callee's RTP, flowing since its own 200 OK, queued up
+// and was then released as one burst that the phone's play buffer
+// discarded (2026-10-31). RFC 3261 §13.3.1.4 makes the ACK the dialog's
+// confirmation, not a media gate: with the offer in the INVITE both
+// sessions are known once the 200 OK is sent, and the UAS may send media
+// from then on, which is what every exchange does.
+//
+// On return the media session is set up and the 200 OK has been handed
+// to the transaction; acked delivers exactly one value when the ACK
+// arrives (nil), when the 2xx retransmissions give up after 64*T1 (nil,
+// with the dialog confirmed and the caller expected to end it with BYE,
+// as Hangup then does) or when the response could not be written (the
+// error). Finalize and the RTCP monitor run on the ACK path as before.
+//
+// A delayed-offer INVITE (no SDP) cannot be answered this way — the
+// answer only arrives in the ACK — so it takes the blocking path and
+// acked is already closed on return.
+func (d *DialogServerSession) AnswerStart(opt AnswerOptions) (acked <-chan error, err error) {
+	ch := make(chan error, 1)
+	if len(d.InviteRequest.Body()) == 0 || d.mediaSession != nil {
+		if err := d.AnswerOptions(opt); err != nil {
+			return nil, err
+		}
+		close(ch)
+		return ch, nil
+	}
+	d.mu.Lock()
+	d.onReferDialog = opt.OnRefer
+	d.onMediaUpdate = opt.OnMediaUpdate
+	d.mu.Unlock()
+	d.updateMediaConf(opt.Codecs, opt.RTPNAT)
+	if err := d.initMediaSessionFromConf(d.mediaConf); err != nil {
+		return nil, err
+	}
+	rtpSess := media.NewRTPSession(d.mediaSession)
+	if err := d.setupRTPSession(rtpSess); err != nil {
+		return nil, err
+	}
+	sess := rtpSess.Sess
+	localSDP := sess.LocalSDP()
+	go func() {
+		// RespondSDP writes the 200 OK and returns on the ACK (or 64*T1).
+		if err := d.RespondSDP(localSDP); err != nil {
+			ch <- err
+			return
+		}
+		if err := sess.Finalize(); err != nil {
+			ch <- err
+			return
+		}
+		ch <- rtpSess.MonitorBackground()
+	}()
+	return ch, nil
+}
+
 func (d *DialogServerSession) updateMediaConf(codecs []media.Codec, rtpNAT int) {
 	// Let override of formats
 	conf := &d.mediaConf
@@ -367,6 +426,14 @@ func (d *DialogServerSession) ReadAck(req *sip.Request, tx sip.ServerTransaction
 func (d *DialogServerSession) Hangup(ctx context.Context) error {
 	state := d.LoadState()
 	if state >= sip.DialogStateConfirmed {
+		return d.Bye(ctx)
+	}
+	// Dialler patch: a dialog whose 200 OK has gone out but whose ACK has
+	// not come back (AnswerStart) is answered, and a second final response
+	// would be a protocol error; it is ended with a BYE, which sipgo's
+	// WriteBye holds until the ACK or the INVITE transaction's timeout, as
+	// RFC 3261 §15 requires of the callee.
+	if state == sip.DialogStateEstablished && d.InviteResponse != nil && d.InviteResponse.IsSuccess() {
 		return d.Bye(ctx)
 	}
 	return d.Respond(sip.StatusTemporarilyUnavailable, "Temporarly unavailable", nil)
