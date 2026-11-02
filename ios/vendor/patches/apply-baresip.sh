@@ -166,6 +166,8 @@ static void aurecv_po_event(const char *kind, int32_t a, int32_t b, void *arg)
 	else if (!strcmp(kind, "target")) k = AU_EV_PO_TARGET;
 	else if (!strcmp(kind, "flush")) k = AU_EV_PO_FLUSH;
 	else if (!strcmp(kind, "overflow")) k = AU_EV_PO_OVERFLOW;
+	else if (!strcmp(kind, "accelerate-quiet")) k = AU_EV_PO_ACCEL_Q;
+	else if (!strcmp(kind, "preemptive-quiet")) k = AU_EV_PO_PREEMPT_Q;
 	if (k != AU_EV_NONE)
 		au_ev_push(k, a, b);
 }
@@ -173,6 +175,11 @@ static void aurecv_po_event(const char *kind, int32_t a, int32_t b, void *arg)
 
 EOF
 patch_insert "$SRC/src/aureceiver.c" 'aurecv_po_event' "$T/a4" "$T/n4" before
+# the quiet-block kinds, added to a bridge patched before they existed
+if ! grep -q 'accelerate-quiet' "$SRC/src/aureceiver.c"; then
+  perl -0pi -e 's/(\telse if \(!strcmp\(kind, "overflow"\)\) k = AU_EV_PO_OVERFLOW;\n)/$1\telse if (!strcmp(kind, "accelerate-quiet")) k = AU_EV_PO_ACCEL_Q;\n\telse if (!strcmp(kind, "preemptive-quiet")) k = AU_EV_PO_PREEMPT_Q;\n/' "$SRC/src/aureceiver.c"
+  grep -q 'accelerate-quiet' "$SRC/src/aureceiver.c" || { echo "patch: aureceiver.c quiet kinds anchor not found"; exit 1; }
+fi
 # push: allocate the engine on the first frame, write frames to it
 cat > "$T/a5" <<'EOF'
 	if (!ar->aubuf) {

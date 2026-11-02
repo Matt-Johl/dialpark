@@ -114,6 +114,37 @@ at full rate should be inaudible. If the next device test still sounds
 wrong at the very start, the thing to look at is that threshold against
 CUCM's comfort noise level (events carry the level only, not the RMS).
 
+### Device check of the gated engine (2026-11-02 morning, two CUCM calls, 4 s and 64 s)
+
+Matt: "a bit better". Both calls: nothing removed, no zeros, 180 and 445 ms
+compressed, 7 ms concealed in the long call. Read against the rules:
+
+- In speech the operations were 15 ms each and 350–400 ms apart, following
+  the target staircase down from 220 ms (one packet per ~400 ms): the 10 %
+  budget at work, as designed.
+- Dense runs at 20 ms spacing (five to six operations of 15 ms, 75–90 ms
+  in 100 ms) at +3.9 s, +4.5 s, +27.0 s and +29.0 s. The gap rule makes
+  these impossible for speech, so they were blocks under the 120 RMS
+  silence threshold — the far end not speaking at those moments. The event
+  dump could not prove it: the accelerate event carried the level, not the
+  block's RMS. New kinds `PO_ACCEL_Q` / `PO_PREEMPT_Q` (a = ms, b = the
+  block's RMS) now separate a drain through quiet from one through speech.
+- The long call had a hold at +23 s and a resume at +25 s (CallKit
+  deactivated and reactivated the session). The resume is a new stream:
+  flush, 320 ms backlog, target 273, drained over 4 s by the same rules.
+  The 176 ms render gap at +24.8 s is the audio unit stopping on hold; the
+  render gaps at the end of each call are the hang-up.
+- Two underruns of 3–4 ms (a single late packet each) were concealed and
+  merged. The underrun bump raised the target by one packet and the next
+  arrival's quantile put it straight back: the bump is undone within 10 ms,
+  so it protects nothing. Harmless here (3 ms), but a design gap to settle
+  on the production branch (NetEq keeps a separate post-underrun hold).
+
+Expected on the next device call: `PO_ACCEL` entries at least 50 ms apart,
+dense runs only as `PO_ACCEL_Q` with b well under 120. If the start still
+sounds wrong while the dump shows only quiet-block operations, the silence
+threshold against CUCM's comfort noise is the next thing to measure.
+
 Bench (harness phones, click-train detector on the recording):
 
 | Scenario | before | after |

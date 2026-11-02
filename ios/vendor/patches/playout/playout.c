@@ -403,7 +403,7 @@ static size_t quiet_offset(const int16_t *x, size_t P, size_t limit)
 /* Accelerate: n output samples from n + P input samples; one pitch period
  * removed by cross-fading x[i..i+P) into x[i+P..i+2P) at a quiet offset i.
  * Returns P, 0 if not done. */
-static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budget_ms)
+static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budget_ms, double *quiet_rms)
 {
 	size_t pmin = ms_to_samp(p, PITCH_MIN_MS), pmax = ms_to_samp(p, PITCH_MAX_MS);
 	size_t w = ms_to_samp(p, CORR_WINDOW_MS), need, P, k, i;
@@ -422,7 +422,8 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 	if (!x)
 		return 0;
 	take(p, p->read_pos, x, need);
-	if (rms(x, n) < SILENCE_RMS) {
+	*quiet_rms = rms(x, n);
+	if (*quiet_rms < SILENCE_RMS) {
 		/* silence or noise: no pitch to respect and nothing to hear,
 		 * remove the most with a short fade, whatever the budget */
 		P = pmax;
@@ -436,6 +437,7 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 		 * inaudible at ~10 %; 15 ms out of every 20 ms (one period per
 		 * read, measured 2026-11-01) is a 75 % speed-up and was heard,
 		 * and scaling an unvoiced or transient block at any rate warbles. */
+		*quiet_rms = -1; /* speech */
 		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
 			free(x);
 			return 0;
@@ -462,7 +464,7 @@ static size_t accelerate(struct playout *p, int16_t *out, size_t n, double budge
 /* Preemptive expand: n output samples from n - P input samples; the pitch
  * period x[i..i+P) is played twice, the repeat cross-faded in, at a quiet
  * offset i so a transient is not doubled. Returns P, 0 if not done. */
-static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budget_ms)
+static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budget_ms, double *quiet_rms)
 {
 	size_t pmin = ms_to_samp(p, PITCH_MIN_MS), pmax = ms_to_samp(p, PITCH_MAX_MS);
 	size_t w = ms_to_samp(p, CORR_WINDOW_MS), P, k, in_n, i;
@@ -481,10 +483,12 @@ static size_t preemptive(struct playout *p, int16_t *out, size_t n, double budge
 	if (!x)
 		return 0;
 	take(p, p->read_pos, x, n);
-	if (rms(x, n) < SILENCE_RMS) {
+	*quiet_rms = rms(x, n);
+	if (*quiet_rms < SILENCE_RMS) {
 		P = pmax;
 	}
 	else {
+		*quiet_rms = -1; /* speech */
 		P = find_pitch(x, w, pmin, pmax, &corr);
 		if (corr < CORR_THRESHOLD || (budget_ms >= 0 && (double)P * 1000 / p->cfg.srate > budget_ms)) {
 			free(x);
@@ -660,13 +664,17 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 	if (avail >= sampc) {
 		bool merged = p->expanding;
 		size_t P = 0;
+		double qrms = -1; /* the block's RMS when it was scaled as quiet, -1 for speech */
 		if (p->level_f >= p->target_ms + p->cfg.ptime_ms && level_ms >= p->target_ms) {
 			double budget = p->since_op_ms < MIN_OP_GAP_MS ? 0 :
 					p->level_f >= p->target_ms + FAST_ABOVE_MS ? -1 : p->accel_credit;
-			P = accelerate(p, out, sampc, budget);
+			P = accelerate(p, out, sampc, budget, &qrms);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;
-				emit(p, "accelerate", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
+				if (qrms >= 0)
+					emit(p, "accelerate-quiet", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)qrms);
+				else
+					emit(p, "accelerate", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
 				p->level_f -= ms;
 				if (budget >= 0)
 					p->accel_credit -= ms;
@@ -676,10 +684,13 @@ static void read_locked(struct playout *p, int16_t *out, size_t sampc, uint64_t 
 		else if (p->level_f + p->cfg.ptime_ms < p->target_ms && !merged) {
 			double budget = p->since_op_ms < MIN_OP_GAP_MS ? 0 :
 					p->level_f < p->cfg.ptime_ms ? -1 : p->stretch_credit;
-			P = preemptive(p, out, sampc, budget);
+			P = preemptive(p, out, sampc, budget, &qrms);
 			if (P) {
 				double ms = (double)P * 1000 / p->cfg.srate;
-				emit(p, "preemptive", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
+				if (qrms >= 0)
+					emit(p, "preemptive-quiet", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)qrms);
+				else
+					emit(p, "preemptive", (int32_t)samp_to_ms(p, (int64_t)P), (int32_t)level_ms);
 				p->level_f += ms;
 				if (budget >= 0)
 					p->stretch_credit -= ms;

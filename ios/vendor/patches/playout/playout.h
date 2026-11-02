@@ -75,7 +75,10 @@ void playout_stats(const struct playout *p, struct playout_stats *st);
  * to disable. a and b are milliseconds or counts as documented per kind. */
 typedef void (playout_event_h)(const char *kind, int32_t a, int32_t b, void *arg);
 void playout_set_event_handler(struct playout *p, playout_event_h *h, void *arg);
-/* kinds: "accelerate" a=ms removed b=level_ms; "preemptive" a=ms added;
+/* kinds: "accelerate" a=ms removed b=level_ms; "preemptive" a=ms added
+ * b=level_ms (both: a speech block that passed the correlation gate, within
+ * the rate rule); "accelerate-quiet" / "preemptive-quiet" a=ms b=the
+ * block's RMS (a block below SILENCE_RMS, scaled at full rate);
  * "expand" a=ms concealed b=level_ms; "zeros" a=ms; "merge";
  * "late" a=samples behind; "target" a=old b=new (ms); "flush". */
 

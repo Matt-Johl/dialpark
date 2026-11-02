@@ -325,4 +325,15 @@ if ! grep -q 'AU_EV_PO_ACCEL' "$SRC/src/tmr/tmr.c"; then
   perl -0pi -e 's/(\tcase AU_EV_REC_OVERFLOW:  return "REC_OVERFLOW";\n)/$1\tcase AU_EV_PO_ACCEL:      return "PO_ACCEL";\n\tcase AU_EV_PO_PREEMPT:    return "PO_PREEMPT";\n\tcase AU_EV_PO_EXPAND:     return "PO_EXPAND";\n\tcase AU_EV_PO_ZEROS:      return "PO_ZEROS";\n\tcase AU_EV_PO_MERGE:      return "PO_MERGE";\n\tcase AU_EV_PO_LATE:       return "PO_LATE";\n\tcase AU_EV_PO_TARGET:     return "PO_TARGET";\n\tcase AU_EV_PO_FLUSH:      return "PO_FLUSH";\n\tcase AU_EV_PO_OVERFLOW:   return "PO_OVERFLOW";\n/' "$SRC/src/tmr/tmr.c"
   grep -q 'AU_EV_PO_ACCEL' "$SRC/src/tmr/tmr.c" || { echo "patch: tmr.c playout names anchor not found"; exit 1; }
 fi
+# Lab: quiet-block variants (a block below the engine's silence threshold,
+# scaled at full rate; b = the block's RMS, so the device log tells a drain
+# through silence from one through speech).
+if ! grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/include/re_tmr.h"; then
+  perl -0pi -e 's/(\tAU_EV_PO_OVERFLOW,[^\n]*\n)/$1\tAU_EV_PO_ACCEL_Q,    \/* playout: a=ms removed from a quiet block, b=its RMS *\/\n\tAU_EV_PO_PREEMPT_Q,  \/* playout: a=ms added to a quiet block, b=its RMS *\/\n/' "$SRC/include/re_tmr.h"
+  grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/include/re_tmr.h" || { echo "patch: re_tmr.h quiet kinds anchor not found"; exit 1; }
+fi
+if ! grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/src/tmr/tmr.c"; then
+  perl -0pi -e 's/(\tcase AU_EV_PO_OVERFLOW:   return "PO_OVERFLOW";\n)/$1\tcase AU_EV_PO_ACCEL_Q:    return "PO_ACCEL_Q";\n\tcase AU_EV_PO_PREEMPT_Q:  return "PO_PREEMPT_Q";\n/' "$SRC/src/tmr/tmr.c"
+  grep -q 'AU_EV_PO_ACCEL_Q' "$SRC/src/tmr/tmr.c" || { echo "patch: tmr.c quiet names anchor not found"; exit 1; }
+fi
 echo "   re: lab playout event kinds present"

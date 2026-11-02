@@ -55,7 +55,7 @@ Plain C99, one lock, no dependencies, mono S16LE at the player's rate.
 `src/aureceiver.c`:
 1. `#include "playout.h"` after `core.h`.
 2. `struct playout *po;` next to `struct aubuf *aubuf;`; `playout_free` in the destructor.
-3. `aurecv_po_event`: the engine's events onto the continuity ring (`AU_EV_PO_*`, declared by `apply-re.sh` in `re_tmr.h`).
+3. `aurecv_po_event`: the engine's events onto the continuity ring (`AU_EV_PO_*`, declared by `apply-re.sh` in `re_tmr.h`; `PO_ACCEL_Q`/`PO_PREEMPT_Q` are the quiet-block variants with the block's RMS in b).
 4. `aurecv_push_aubuf`: allocate the engine on the first decoded frame from `cfg->buffer.min/max` (ms), the frame's post-filter sample rate and `ar->ptime`; write each frame with `playout_write(pcm, sampc, ts_samples, now_us)` where `ts_samples = af.timestamp * srate / AUDIO_TIMEBASE`; a late packet is a statistic, not an error; `stats.latency` from `playout_stats().level_ms`.
 5. SSRC change (`flush`) and `aurecv_flush` also `playout_flush`.
 6. `aurecv_read`: the player pulls `playout_read(af->sampv, af->sampc, now_us)`; the engine has its own lock, `aubuf_mtx` only guards the pointer.
