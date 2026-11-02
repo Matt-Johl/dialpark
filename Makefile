@@ -458,10 +458,18 @@ sim-call-decline-reset:
 sim-call-ring-reset:
 	RING_RESET=1 sh harness/sim_call.sh
 
-# The incoming, outbound, decline, ring-reset, refused, reconnect and
-# call-waiting runs every call-path change must pass.
+# An outgoing call whose far end rings for 1.5 s: the audio units must be
+# prepared while it rings (CallKit activated the session at dial time),
+# adopted at the answer and running within 100 ms of the call being
+# established (ios/vendor/patches/audiounit/sess.c, 2026-11-02).
+sim-call-prepared:
+	OUTBOUND=212 CALLEE_ANSWER_MS=1500 sh harness/sim_call.sh
+
+# The incoming, outbound, prepared-units, decline, ring-reset, refused,
+# reconnect and call-waiting runs every call-path change must pass.
 sim-call-all:
 	OUTBOUND=212 sh harness/sim_call.sh
+	OUTBOUND=212 CALLEE_ANSWER_MS=1500 sh harness/sim_call.sh
 	CALLS=2 sh harness/sim_call.sh
 	DECLINE=1 sh harness/sim_call.sh
 	RING_RESET=1 sh harness/sim_call.sh
@@ -473,7 +481,8 @@ SIM ?= iPhone 16
 audio-probe-sim:
 	cd ios/DiallerEngine && $(SWIFT_CACHE_ENV) swift build --disable-sandbox --scratch-path "$(IOS_SCRATCH)" --triple $(IOS_TRIPLE) --sdk "$(IOS_SDK)" --product audio-probe 2>&1 | grep -vE 'Wincomplete-umbrella|Wvisibility' || true
 	xcrun simctl boot "$(SIM)" 2>/dev/null || true
-	xcrun simctl spawn "$(SIM)" "$(IOS_SCRATCH)/arm64-apple-ios-simulator/debug/audio-probe"
+	@bin="$(IOS_SCRATCH)/debug/audio-probe"; [ -x "$$bin" ] || bin="$(IOS_SCRATCH)/arm64-apple-ios-simulator/debug/audio-probe"; \
+	  xcrun simctl spawn "$(SIM)" "$$bin"
 
 # Build for the simulator with Xcode (needs an unrestricted shell).
 ios-build:

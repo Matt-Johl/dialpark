@@ -48,4 +48,26 @@ int audiounit_recorder_alloc(struct ausrc_st **stp, const struct ausrc *as,
 			     ausrc_read_h *rh, ausrc_error_h *errh, void *arg);
 
 
+/* Dialler (prepared units, see sess.c): the expensive part of a unit —
+ * creating and initialising the voice-processing I/O — is separate from
+ * binding it to a client, so it can be done ahead of the call. */
+struct audiounit_fmt {
+	uint32_t srate;
+	uint32_t ch;
+	enum aufmt fmt;
+};
+
+bool audiounit_fmt_equal(const struct audiounit_fmt *a,
+			 const struct audiounit_fmt *b);
+OSStatus audiounit_player_create(const struct audiounit_fmt *fmt,
+				 AudioUnit *aup);
+OSStatus audiounit_recorder_create(const struct audiounit_fmt *fmt,
+				   AudioUnit *aup);
+void audiounit_unit_dispose(AudioUnit au);
+
+bool audiosess_take_player(const struct audiounit_fmt *fmt, AudioUnit *aup);
+bool audiosess_take_recorder(const struct audiounit_fmt *fmt, AudioUnit *aup);
+uint64_t audiounit_now_us(void);
+
+
 uint32_t audiounit_aufmt_to_formatflags(enum aufmt fmt);

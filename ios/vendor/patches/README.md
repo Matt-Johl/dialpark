@@ -54,6 +54,49 @@ give up on the answered call's audio entirely — the device logged
 unconfigured; `interrupt_handler(false)` already sets up a unit it finds
 missing, so the next `didActivate` builds and starts it.
 
+### audiounit: units prepared before the answer
+
+On an outgoing call CallKit activates the session at dial time, but the
+units were only created when the call was answered, inside the 200 OK's
+handling: `AudioComponentInstanceNew` + `AudioUnitInitialize` of the
+voice-processing I/O, ~100 ms each for player and recorder, on the libre
+loop — which therefore read no RTP for ~200 ms while the far end's opening
+queued in the socket and then came out as one burst (device 10911,
+2026-11-02: 220 ms from "Call answered" to "Call established", the ACK
+after it, the engine's target 204–291 ms at its first read with the
+server already relaying at the answer, SPEC §4.4 rule 3).
+
+The patch separates creating a unit (`audiounit_player_create`,
+`audiounit_recorder_create`: component, I/O enable, format, initialise;
+bound to nobody) from binding it to a client (`player_bind`,
+`recorder_bind`: the render/input callback, and for the recorder its
+cheap format converter). `sess.c` prepares one of each when the host
+releases the audio and no client exists — the ringing phase of an
+outgoing call — and an alloc whose format matches adopts them
+(`audiosess_take_player` / `_recorder`) in microseconds. A hold discards
+them; a client with another format sets up afresh and the prepared unit
+is discarded; a preparation that fails (the session in flux) is logged
+and the call sets up afresh as before. The engine pins the device format
+(`auplay_srate 48000`, `ausrc_srate 48000`, one channel) so every codec's
+call adopts them, with baresip resampling between codec and device.
+
+Incoming calls cannot be prepared this far: the session is activated only
+after the user answers, and a unit created or initialised on an inactive
+session fails with `'!pri'`. What is allowed before activation — the
+session's category, mode, sample rate and buffer duration — the app
+already sets before it reports the call (`CallKitBridge.reportIncoming`),
+so the activation only has to build and start the units.
+
+The driver logs what it did and how long it took: `prepared player and
+record units in N ms`, `player adopted the prepared unit in N ms` or `set
+up afresh in N ms`, `started N unit(s) in N ms`, `prepared units
+discarded (why)`. Verified by `make audio-probe-sim` scenarios E and F
+(prepared units adopted in a fraction of a cold setup and flowing; a hold
+discards them and a held allocation still sets up on release) and by
+`make sim-call-prepared` (the far end rings for 1.5 s; the units must be
+prepared while it rings, adopted at the answer, and running within 100 ms
+of the call being established).
+
 ## apply-baresip.sh — `ua_refresh_register()`
 
 baresip's `ua_register()` on an already registered user agent destroys

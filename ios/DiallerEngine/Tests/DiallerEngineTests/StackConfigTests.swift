@@ -38,6 +38,10 @@ final class StackConfigTests: XCTestCase {
             "sip_tos": "96", // DSCP CS3 on signalling (baresip's default would be CS5)
             "audio_player": "audiounit,default",
             "audio_source": "audiounit,default",
+            "auplay_srate": "48000", // the device format is pinned so prepared units fit every codec
+            "ausrc_srate": "48000",
+            "auplay_channels": "1",
+            "ausrc_channels": "1",
             "call_max_calls": "2", // call waiting: one active, one held; a third caller gets 486
         ]
         for (k, v) in expected {

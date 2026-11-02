@@ -222,7 +222,15 @@ are already implemented — do not remove them because remote reach is deferred.
    `bridged` line logs `answer_to_relay_ms`, `call ended` the ACK's
    `ack_ms` and each pump's `backlog_pkts` (packets already queued when
    the relay started); `make harness-slow-ack` holds a caller's ACK back
-   500 ms and requires the relay to have started regardless.
+   500 ms and requires the relay to have started regardless. The app's
+   half of the same start: on an outgoing call CallKit activates the
+   session at dial time, so the audiounit driver prepares its units while
+   the far end rings and the answer only binds and starts them (the
+   ~200 ms of unit creation that used to sit between the 200 OK and the
+   ACK, with no RTP read meanwhile, is gone; `make sim-call-prepared`,
+   `ios/vendor/patches/README.md`). An incoming call's session is only
+   activated once the user answers, so there the units are built at the
+   activation, with the session already configured beforehand.
 4. **SRTP mandatory.** *Done 2026-09-13 (plan Phase F):* SDES SRTP
    (AES_CM_128_HMAC_SHA1_80) on every app-leg media session — the server
    offers and answers RTP/SAVP with `a=crypto` on the TLS transport

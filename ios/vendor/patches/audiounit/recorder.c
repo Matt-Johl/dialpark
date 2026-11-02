@@ -8,6 +8,11 @@
  * or initialising a unit on a deactivated session fails with '!pri'
  * (insufficient priority). The units are created, configured, initialised
  * and started when the host releases the audio.
+ *
+ * Prepared units (2026-11-02, see player.c): the voice-processing input
+ * unit is created and initialised apart from binding it to a client
+ * (recorder_bind, which also builds the cheap format converter), so
+ * sess.c can prepare it ahead of the call and alloc adopts it.
  */
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -181,14 +186,61 @@ static OSStatus convert_callback(void *inRefCon,
 }
 
 
-/* Create, configure and initialise the input unit and its converter. Only
- * called while the host has the audio released (session active). */
-static OSStatus recorder_setup(struct ausrc_st *st)
+/* The hardware stream format for fmt at hw_srate. */
+static AudioStreamBasicDescription recorder_asbd(const struct audiounit_fmt *f,
+						 Float64 hw_srate)
 {
-	AudioStreamBasicDescription fmt, fmt_app;
+	AudioStreamBasicDescription fmt;
+	uint32_t sampsz = (uint32_t)aufmt_sample_size(f->fmt);
+
+	fmt.mSampleRate       = hw_srate;
+	fmt.mFormatID         = kAudioFormatLinearPCM;
+#if TARGET_OS_IPHONE
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(f->fmt)
+		| kAudioFormatFlagsNativeEndian
+		| kAudioFormatFlagIsPacked;
+#else
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(f->fmt)
+		| kLinearPCMFormatFlagIsPacked;
+#endif
+	fmt.mBitsPerChannel   = 8 * sampsz;
+	fmt.mChannelsPerFrame = f->ch;
+	fmt.mBytesPerFrame    = sampsz * f->ch;
+	fmt.mFramesPerPacket  = 1;
+	fmt.mBytesPerPacket   = sampsz * f->ch;
+	fmt.mReserved         = 0;
+	return fmt;
+}
+
+
+/* The input unit's hardware rate: the requested rate on iOS (the voice
+ * processing unit runs at the session's rate, which the app sets to the
+ * same value), the device's own rate on macOS. */
+static OSStatus recorder_hw_srate(AudioUnit au, const struct audiounit_fmt *f,
+				  Float64 *hw_srate)
+{
+#if TARGET_OS_IPHONE
+	(void)au;
+	*hw_srate = f->srate;
+	return noErr;
+#else
 	const AudioUnitElement inputBus = 1;
-	const AudioUnitElement defaultBus = 0;
-	AURenderCallbackStruct cb_in, cb_conv;
+	UInt32 hw_size = sizeof(*hw_srate);
+	(void)f;
+	return AudioUnitGetProperty(au, kAudioUnitProperty_SampleRate,
+				    kAudioUnitScope_Input, inputBus,
+				    hw_srate, &hw_size);
+#endif
+}
+
+
+/* Create, configure and initialise an input unit for fmt, bound to no
+ * client. The expensive step (voice processing I/O). Only while the host
+ * has the audio released (session active). */
+OSStatus audiounit_recorder_create(const struct audiounit_fmt *f, AudioUnit *aup)
+{
+	AudioStreamBasicDescription fmt;
+	const AudioUnitElement inputBus = 1;
 	const UInt32 enable = 1;
 #if ! TARGET_OS_IPHONE
 	const AudioUnitElement outputBus = 0;
@@ -201,93 +253,82 @@ static OSStatus recorder_setup(struct ausrc_st *st)
 		kAudioObjectPropertyElementMain };
 #endif
 	Float64 hw_srate = 0.0;
-	UInt32 hw_size = sizeof(hw_srate);
+	AudioUnit au = NULL;
 	OSStatus ret;
 
-	ret = AudioComponentInstanceNew(audiounit_comp_io, &st->au_in);
+	ret = AudioComponentInstanceNew(audiounit_comp_io, &au);
 	if (ret)
 		return ret;
 
-	ret = AudioUnitSetProperty(st->au_in,
-				   kAudioOutputUnitProperty_EnableIO,
+	ret = AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Input, inputBus,
 				   &enable, sizeof(enable));
 	if (ret)
 		goto fail;
 
 #if ! TARGET_OS_IPHONE
-	ret = AudioUnitSetProperty(st->au_in,
-				   kAudioOutputUnitProperty_EnableIO,
+	ret = AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Output, outputBus,
 				   &disable, sizeof(disable));
 	if (ret)
 		goto fail;
 
 	ret = AudioObjectGetPropertyData(kAudioObjectSystemObject,
-			&auAddress,
-			0,
-			NULL,
-			&ausize,
-			&inputDevice);
+			&auAddress, 0, NULL, &ausize, &inputDevice);
 	if (ret)
 		goto fail;
 
-	ret = AudioUnitSetProperty(st->au_in,
-			kAudioOutputUnitProperty_CurrentDevice,
-			kAudioUnitScope_Global,
-			0,
-			&inputDevice,
-			sizeof(inputDevice));
+	ret = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+				   kAudioUnitScope_Global, 0,
+				   &inputDevice, sizeof(inputDevice));
 	if (ret)
 		goto fail;
 #endif
 
-#if TARGET_OS_IPHONE
-	hw_srate = st->prm.srate;
-	(void)hw_size;
-#else
-	ret = AudioUnitGetProperty(st->au_in,
-				   kAudioUnitProperty_SampleRate,
-				   kAudioUnitScope_Input,
-				   inputBus,
-				   &hw_srate,
-				   &hw_size);
+	ret = recorder_hw_srate(au, f, &hw_srate);
 	if (ret)
 		goto fail;
-#endif
 
 	debug("audiounit: record hardware sample rate is now at %f Hz\n",
 	      hw_srate);
 
-	st->sampc_ratio = st->prm.srate / hw_srate;
-
-	fmt.mSampleRate       = hw_srate;
-	fmt.mFormatID         = kAudioFormatLinearPCM;
-#if TARGET_OS_IPHONE
-	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(st->prm.fmt)
-		| kAudioFormatFlagsNativeEndian
-		| kAudioFormatFlagIsPacked;
-#else
-	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(st->prm.fmt)
-		| kLinearPCMFormatFlagIsPacked;
-#endif
-	fmt.mBitsPerChannel   = 8 * st->sampsz;
-	fmt.mChannelsPerFrame = st->prm.ch;
-	fmt.mBytesPerFrame    = st->sampsz * st->prm.ch;
-	fmt.mFramesPerPacket  = 1;
-	fmt.mBytesPerPacket   = st->sampsz * st->prm.ch;
-	fmt.mReserved         = 0;
-
-	ret = AudioUnitSetProperty(st->au_in, kAudioUnitProperty_StreamFormat,
+	fmt = recorder_asbd(f, hw_srate);
+	ret = AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
 				   kAudioUnitScope_Output, inputBus,
 				   &fmt, sizeof(fmt));
 	if (ret)
 		goto fail;
 
 	/* NOTE: done after desc */
-	ret = AudioUnitInitialize(st->au_in);
+	ret = AudioUnitInitialize(au);
 	if (ret)
 		goto fail;
+
+	*aup = au;
+	return noErr;
+
+ fail:
+	AudioComponentInstanceDispose(au);
+	return ret;
+}
+
+
+/* Bind the client to its (created) input unit and build its format
+ * converter: cheap, no hardware. */
+static OSStatus recorder_bind(struct ausrc_st *st)
+{
+	struct audiounit_fmt f = { st->prm.srate, st->prm.ch, st->prm.fmt };
+	AudioStreamBasicDescription fmt, fmt_app;
+	const AudioUnitElement inputBus = 1;
+	const AudioUnitElement defaultBus = 0;
+	AURenderCallbackStruct cb_in, cb_conv;
+	Float64 hw_srate = 0.0;
+	OSStatus ret;
+
+	ret = recorder_hw_srate(st->au_in, &f, &hw_srate);
+	if (ret)
+		return ret;
+	st->sampc_ratio = st->prm.srate / hw_srate;
 
 	cb_in.inputProc = input_callback;
 	cb_in.inputProcRefCon = st;
@@ -296,8 +337,9 @@ static OSStatus recorder_setup(struct ausrc_st *st)
 				   kAudioUnitScope_Global, inputBus,
 				   &cb_in, sizeof(cb_in));
 	if (ret)
-		goto fail;
+		return ret;
 
+	fmt = recorder_asbd(&f, hw_srate);
 	fmt_app = fmt;
 	fmt_app.mSampleRate = st->prm.srate;
 
@@ -305,39 +347,30 @@ static OSStatus recorder_setup(struct ausrc_st *st)
 	if (ret) {
 		warning("audiounit: record: AudioConverter failed (%d)\n",
 			ret);
-		goto fail;
+		return ret;
 	}
 
 	info("audiounit: record: enable resampler %.1f -> %u Hz\n",
 	     hw_srate, st->prm.srate);
 
-	ret = AudioUnitSetProperty(st->au_conv,
-				   kAudioUnitProperty_StreamFormat,
-				   kAudioUnitScope_Input,
-				   defaultBus,
-				   &fmt,
-				   sizeof(fmt));
+	ret = AudioUnitSetProperty(st->au_conv, kAudioUnitProperty_StreamFormat,
+				   kAudioUnitScope_Input, defaultBus,
+				   &fmt, sizeof(fmt));
 	if (ret)
 		goto fail;
 
-	ret = AudioUnitSetProperty(st->au_conv,
-				   kAudioUnitProperty_StreamFormat,
-				   kAudioUnitScope_Output,
-				   defaultBus,
-				   &fmt_app,
-				   sizeof(fmt_app));
+	ret = AudioUnitSetProperty(st->au_conv, kAudioUnitProperty_StreamFormat,
+				   kAudioUnitScope_Output, defaultBus,
+				   &fmt_app, sizeof(fmt_app));
 	if (ret)
 		goto fail;
 
 	cb_conv.inputProc = convert_callback;
 	cb_conv.inputProcRefCon = st;
-
 	ret = AudioUnitSetProperty(st->au_conv,
 				   kAudioUnitProperty_SetRenderCallback,
-				   kAudioUnitScope_Input,
-				   defaultBus,
-				   &cb_conv,
-				   sizeof(cb_conv));
+				   kAudioUnitScope_Input, defaultBus,
+				   &cb_conv, sizeof(cb_conv));
 	if (ret)
 		goto fail;
 
@@ -348,15 +381,39 @@ static OSStatus recorder_setup(struct ausrc_st *st)
 	return noErr;
 
  fail:
-	if (st->au_conv) {
-		AudioComponentInstanceDispose(st->au_conv);
-		st->au_conv = NULL;
-	}
-	if (st->au_in) {
-		AudioComponentInstanceDispose(st->au_in);
-		st->au_in = NULL;
-	}
+	AudioComponentInstanceDispose(st->au_conv);
+	st->au_conv = NULL;
 	return ret;
+}
+
+
+/* Give the client an input unit: the prepared one when its format
+ * matches, otherwise a fresh one; then bind. Only while the host has the
+ * audio released (session active). */
+static OSStatus recorder_setup(struct ausrc_st *st)
+{
+	struct audiounit_fmt f = { st->prm.srate, st->prm.ch, st->prm.fmt };
+	uint64_t t0 = audiounit_now_us();
+	bool adopted = audiosess_take_recorder(&f, &st->au_in);
+	OSStatus ret;
+
+	if (!adopted) {
+		ret = audiounit_recorder_create(&f, &st->au_in);
+		if (ret)
+			return ret;
+	}
+
+	ret = recorder_bind(st);
+	if (ret) {
+		audiounit_unit_dispose(st->au_in);
+		st->au_in = NULL;
+		return ret;
+	}
+
+	info("audiounit: record %s in %llu ms\n",
+	     adopted ? "adopted the prepared unit" : "set up afresh",
+	     (unsigned long long)((audiounit_now_us() - t0) / 1000));
+	return noErr;
 }
 
 

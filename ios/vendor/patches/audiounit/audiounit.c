@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Alfred E. Heggestad
  *
  * Dialler patch (manual audio): module_close cancels the deferred-start
- * timer; see sess.c.
+ * timer and discards prepared units; see sess.c.
  */
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -122,6 +122,29 @@ OSStatus init_data_read(struct conv_buf *buf, void **data,
 	buf->nb_frames = delta;
 
 	return noErr;
+}
+
+
+bool audiounit_fmt_equal(const struct audiounit_fmt *a,
+			 const struct audiounit_fmt *b)
+{
+	return a->srate == b->srate && a->ch == b->ch && a->fmt == b->fmt;
+}
+
+
+/* Uninitialise and dispose a unit that is not running (NULL is fine). */
+void audiounit_unit_dispose(AudioUnit au)
+{
+	if (!au)
+		return;
+	AudioUnitUninitialize(au);
+	AudioComponentInstanceDispose(au);
+}
+
+
+uint64_t audiounit_now_us(void)
+{
+	return tmr_jiffies_usec();
 }
 
 

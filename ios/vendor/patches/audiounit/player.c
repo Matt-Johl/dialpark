@@ -8,6 +8,14 @@
  * or initialising a unit on a deactivated session fails with '!pri'
  * (insufficient priority). The unit is created, configured, initialised
  * and started when the host releases the audio.
+ *
+ * Prepared units (2026-11-02): creating and initialising the
+ * voice-processing unit takes ~100 ms, and on an outgoing call that ran
+ * at the answer, inside the 200 OK's handling, so the far end's first
+ * 200–300 ms of audio queued behind it (SPEC §4.4 rule 3). The creation
+ * (audiounit_player_create) is now separate from binding the unit to a
+ * client (player_bind): sess.c prepares a unit while the session is
+ * active and no call is up, and alloc adopts it in microseconds.
  */
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -107,23 +115,23 @@ static OSStatus output_callback(void *inRefCon,
 }
 
 
-/* Create, configure and initialise the output unit. Only called while the
- * host has the audio released (session active). */
-static OSStatus player_setup(struct auplay_st *st)
+/* Create, configure and initialise an output unit for fmt, bound to no
+ * client. The expensive step (voice processing I/O). Only while the host
+ * has the audio released (session active). */
+OSStatus audiounit_player_create(const struct audiounit_fmt *f, AudioUnit *aup)
 {
 	AudioStreamBasicDescription fmt;
 	const AudioUnitElement outputBus = 0;
-	AURenderCallbackStruct cb;
 	const UInt32 enable = 1;
+	uint32_t sampsz = (uint32_t)aufmt_sample_size(f->fmt);
+	AudioUnit au = NULL;
 	OSStatus ret;
-	Float64 hw_srate = 0.0;
-	UInt32 hw_size = sizeof(hw_srate);
 
-	ret = AudioComponentInstanceNew(audiounit_comp_io, &st->au);
+	ret = AudioComponentInstanceNew(audiounit_comp_io, &au);
 	if (ret)
 		return ret;
 
-	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
+	ret = AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Output, outputBus,
 				   &enable, sizeof(enable));
 	if (ret) {
@@ -131,31 +139,49 @@ static OSStatus player_setup(struct auplay_st *st)
 		goto fail;
 	}
 
-	fmt.mSampleRate       = st->prm.srate;
+	fmt.mSampleRate       = f->srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
 #if TARGET_OS_IPHONE
-	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(st->prm.fmt)
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(f->fmt)
 		| kAudioFormatFlagsNativeEndian
 		| kAudioFormatFlagIsPacked;
 #else
-	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(st->prm.fmt)
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(f->fmt)
 		| kAudioFormatFlagIsPacked;
 #endif
-	fmt.mBitsPerChannel   = 8 * st->sampsz;
-	fmt.mChannelsPerFrame = st->prm.ch;
-	fmt.mBytesPerFrame    = st->sampsz * st->prm.ch;
+	fmt.mBitsPerChannel   = 8 * sampsz;
+	fmt.mChannelsPerFrame = f->ch;
+	fmt.mBytesPerFrame    = sampsz * f->ch;
 	fmt.mFramesPerPacket  = 1;
-	fmt.mBytesPerPacket   = st->sampsz * st->prm.ch;
+	fmt.mBytesPerPacket   = sampsz * f->ch;
 
-	ret = AudioUnitInitialize(st->au);
+	ret = AudioUnitInitialize(au);
 	if (ret)
 		goto fail;
 
-	ret = AudioUnitSetProperty(st->au, kAudioUnitProperty_StreamFormat,
+	ret = AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
 				   kAudioUnitScope_Input, outputBus,
 				   &fmt, sizeof(fmt));
 	if (ret)
 		goto fail;
+
+	*aup = au;
+	return noErr;
+
+ fail:
+	AudioComponentInstanceDispose(au);
+	return ret;
+}
+
+
+/* Bind the client's render callback to its (created) unit: cheap. */
+static OSStatus player_bind(struct auplay_st *st)
+{
+	const AudioUnitElement outputBus = 0;
+	AURenderCallbackStruct cb;
+	Float64 hw_srate = 0.0;
+	UInt32 hw_size = sizeof(hw_srate);
+	OSStatus ret;
 
 	cb.inputProc = output_callback;
 	cb.inputProcRefCon = st;
@@ -164,7 +190,7 @@ static OSStatus player_setup(struct auplay_st *st)
 				   kAudioUnitScope_Input, outputBus,
 				   &cb, sizeof(cb));
 	if (ret)
-		goto fail;
+		return ret;
 
 	if (0 == AudioUnitGetProperty(st->au, kAudioUnitProperty_SampleRate,
 				      kAudioUnitScope_Output, outputBus,
@@ -174,11 +200,36 @@ static OSStatus player_setup(struct auplay_st *st)
 	}
 
 	return noErr;
+}
 
- fail:
-	AudioComponentInstanceDispose(st->au);
-	st->au = NULL;
-	return ret;
+
+/* Give the client a unit: the prepared one when its format matches,
+ * otherwise a fresh one; then bind. Only while the host has the audio
+ * released (session active). */
+static OSStatus player_setup(struct auplay_st *st)
+{
+	struct audiounit_fmt f = { st->prm.srate, st->prm.ch, st->prm.fmt };
+	uint64_t t0 = audiounit_now_us();
+	bool adopted = audiosess_take_player(&f, &st->au);
+	OSStatus ret;
+
+	if (!adopted) {
+		ret = audiounit_player_create(&f, &st->au);
+		if (ret)
+			return ret;
+	}
+
+	ret = player_bind(st);
+	if (ret) {
+		audiounit_unit_dispose(st->au);
+		st->au = NULL;
+		return ret;
+	}
+
+	info("audiounit: player %s in %llu ms\n",
+	     adopted ? "adopted the prepared unit" : "set up afresh",
+	     (unsigned long long)((audiounit_now_us() - t0) / 1000));
+	return noErr;
 }
 
 
