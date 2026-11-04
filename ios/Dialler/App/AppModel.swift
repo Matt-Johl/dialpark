@@ -3,6 +3,7 @@ import Combine
 import DiallerCore
 import DiallerProtocol
 import Foundation
+import Intents
 import MetricKit
 // @preconcurrency: NetworkExtension's classes (NEAppPushManager) are not yet
 // marked Sendable, and its completion handlers are @Sendable. We only touch
@@ -138,6 +139,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// iPhone Recents (Settings; SPEC §6 item 16): on, Dialler's calls are
+    /// written to the Phone app's Recents, where they call back through
+    /// Dialler (`callBack(activity:)`); off, nothing is written and the
+    /// history lives in Dialler's Recents tab alone. Rows already written
+    /// stay in the Phone app and still call back. Persisted; default on,
+    /// which is what the app did before the setting existed.
+    @Published var showsCallsInPhoneRecents: Bool {
+        didSet {
+            callKit.set(includesCallsInRecents: showsCallsInPhoneRecents)
+            UserDefaults.standard.set(showsCallsInPhoneRecents, forKey: Self.phoneRecentsKey)
+        }
+    }
+
+    private static let phoneRecentsKey = "phoneRecents"
+    private static var savedShowsCallsInPhoneRecents: Bool {
+        UserDefaults.standard.object(forKey: phoneRecentsKey) as? Bool ?? true
+    }
+
     private func upsertCall(_ id: String, outgoing: Bool, connectedAt: Date?) {
         let title = controller.activeCalls.first { $0.wake.callID == id }.map { self.title(for: $0) } ?? "Call"
         if let i = calls.firstIndex(where: { $0.id == id }) {
@@ -174,7 +193,7 @@ final class AppModel: ObservableObject {
     }
 
     private let store: AppConfigStore = AppGroupConfigStore(appGroup: DiallerIDs.appGroup)
-    private let callKit = CallKitBridge()
+    private let callKit = CallKitBridge(includesCallsInRecents: AppModel.savedShowsCallsInPhoneRecents)
     /// Call-progress tones into the call's audio session (plan Phase J).
     private lazy var tones = TonePlayer(log: { [weak self] m in Task { @MainActor in self?.append(m) } })
     /// The controller's engine: the SIP engine, or the demo's in demo mode.
@@ -234,6 +253,7 @@ final class AppModel: ObservableObject {
 
     init() {
         callWaiting = UserDefaults.standard.object(forKey: "callWaiting") as? Bool ?? true
+        showsCallsInPhoneRecents = Self.savedShowsCallsInPhoneRecents
         Breadcrumb.drop("AppModel: creating the SIP engine")
         let demo = DemoCallEngine()
         demoEngine = demo
@@ -392,7 +412,7 @@ final class AppModel: ObservableObject {
         }
         #if canImport(DiallerEngine)
         baresip.log = { [weak self] m in Task { @MainActor in self?.append(m) } }
-        baresip.onStateChange = { [weak self] s in Task { @MainActor in self?.engineState = Self.engineText(s) } }
+        baresip.onStateChange = { [weak self] s in Task { @MainActor in self?.engineChanged(s) } }
         #else
         logging.log = { [weak self] m in Task { @MainActor in self?.append(m) } }
         #endif
@@ -413,6 +433,7 @@ final class AppModel: ObservableObject {
     func dial(_ target: String) -> String? {
         let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
+        dropPendingCallBack() // the user's own dial supersedes a held call-back
         let name = contacts.first { $0.uri == t || CallController.userPart(of: $0.uri) == t }?.displayName
         let id = controller.startCall(to: t, displayName: name)
         if id == nil {
@@ -538,6 +559,94 @@ final class AppModel: ObservableObject {
         AppConfig(gateway: GatewayEndpoint(host: host, port: UInt16(port) ?? 7443, acceptAnyCertificate: acceptAnyCertificate, certSHA256: certSHA256),
                   deviceID: deviceID, token: token)
     }
+
+    // MARK: Call-back from the Phone app (SPEC §6 item 16)
+
+    /// A call-back from the Phone app's Recents. A CallKit call written there
+    /// (`includesCallsInRecents`) is not a number the Phone app can dial: a
+    /// tap on its row makes the system build an `INStartCallIntent` for the
+    /// row's handle and ask our Intents extension (`IntentsExtension/
+    /// IntentHandler.swift`) to handle it; the extension answers "continue
+    /// in app", and the system opens the app with an `NSUserActivity` of
+    /// that type, the intent inside it, which
+    /// `ContentView.onContinueUserActivity("INStartCallIntent")` receives.
+    /// Apple's own CallKit sample is this exact shape. The handle is the
+    /// string the app gave CallKit — what it dialled or the server reported,
+    /// the same value the Recents tab calls back with — so it goes to `dial`
+    /// as it is.
+    ///
+    /// Warm, the dial is immediate. Cold (the tap launched the app) the
+    /// activity arrives before the gateway has welcomed us and the SIP
+    /// engine has registered, and `startCall` would refuse it ("no SIP
+    /// account yet"); the target is held and dialled the moment the engine
+    /// is up (`engineChanged`) or, in the demo, the welcome has arrived.
+    func callBack(activity: NSUserActivity) {
+        guard let intent = activity.interaction?.intent as? INStartCallIntent else {
+            append("phone recents: ignored activity \(activity.activityType)")
+            return
+        }
+        guard let handle = intent.contacts?.first?.personHandle?.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !handle.isEmpty else {
+            append("phone recents: call-back without a handle ignored")
+            return
+        }
+        Breadcrumb.drop("phone recents: call-back to \(handle)")
+        if readyToDial {
+            append("phone recents: calling back \(handle)")
+            dial(handle)
+        } else {
+            append("phone recents: holding call-back to \(handle) until the engine is up")
+            pendingCallBack = handle
+            pendingCallBackExpiry?.cancel()
+            pendingCallBackExpiry = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(Self.callBackHoldSeconds) * 1_000_000_000)
+                guard !Task.isCancelled, let self, let held = self.pendingCallBack else { return }
+                // Not a retry: a call placed minutes after the tap, when
+                // the person has moved on, is a surprise call, not a late
+                // success. The hold is as long as a launch and registration
+                // reasonably take; past that the tap is dropped and said so.
+                self.append("phone recents: call-back to \(held) dropped — not registered after \(Self.callBackHoldSeconds) s")
+                self.pendingCallBack = nil
+                self.pendingCallBackExpiry = nil
+            }
+        }
+    }
+
+    /// A call-back from the Phone app waiting for the engine (cold launch).
+    private var pendingCallBack: String?
+    private var pendingCallBackExpiry: Task<Void, Never>?
+    private static let callBackHoldSeconds = 30
+    /// The SIP stack is registered (or the demo's welcome has arrived), so
+    /// `startCall` has an account and the engine can dial. Set from the
+    /// engine's state, not from the gateway's: the welcome sets the
+    /// account and starts registration, and a dial before registration
+    /// completes would still fail.
+    private var engineUp = false
+    private var readyToDial: Bool { isDemo ? link == .connected : engineUp }
+
+    private func flushPendingCallBack() {
+        guard let handle = pendingCallBack, readyToDial else { return }
+        dropPendingCallBack()
+        append("phone recents: calling back \(handle) now the engine is up")
+        dial(handle)
+    }
+
+    private func dropPendingCallBack() {
+        pendingCallBack = nil
+        pendingCallBackExpiry?.cancel()
+        pendingCallBackExpiry = nil
+    }
+
+    #if canImport(DiallerEngine)
+    private func engineChanged(_ state: BaresipCallEngine.State) {
+        engineState = Self.engineText(state)
+        switch state {
+        case .idle, .starting, .registering, .failed: engineUp = false
+        case .registered, .ringing, .dialing, .inCall: engineUp = true
+        }
+        flushPendingCallBack()
+    }
+    #endif
 
     // MARK: Enrolment (SPEC §6 item 8, §4.8)
 
@@ -892,6 +1001,7 @@ final class AppModel: ObservableObject {
                                       sip: SIPTarget(host: sip.host, port: sip.port, transport: sip.transport))
             }
             if let cfg = w.config { apply(deviceConfig: cfg) }
+            flushPendingCallBack()
             if w.directoryVersion != book.version { await syncDirectory() }
         case .wake, .wakeCancel:
             controller.handle(ev)

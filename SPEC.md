@@ -1850,6 +1850,41 @@ on by config — see §7.4.
      a check that an unassigned port of the range is not listening, and
      that deleting a line frees its port within a second.
 
+  16. **Call-back from the Phone app's Recents (app; noted 2026-11-04).**
+     Calls were written to the Phone app's Recents
+     (`includesCallsInRecents`) but a tap on one of those rows did nothing.
+     A CallKit row is not a number the Phone app can dial: the system
+     builds an `INStartCallIntent` for the row's handle and asks the owning
+     app's **Intents extension** to handle it; the extension answers
+     "continue in app" and the system opens the app with an
+     `NSUserActivity` of that type carrying the intent (Apple's CallKit
+     sample "VoIP calling with CallKit", `IntentsExtension/IntentHandler.swift`
+     plus the app's continue-user-activity handler, is exactly this). The
+     app had no Intents extension and no handler, so the tap only opened
+     it. Rule: **no dead rows** — either a row calls back through Dialler
+     or it is not written. The change: a third target, `IntentsExtension`
+     (`com.apple.intents-service`, `IntentsSupported` = `INStartCallIntent`),
+     whose handler fails an intent without a handle and otherwise continues
+     in the app, as Apple's does; `AppModel.callBack(activity:)` behind
+     `ContentView.onContinueUserActivity("INStartCallIntent")` (Info.plist
+     `NSUserActivityTypes` lists the type, as SwiftUI's documentation
+     requires) dials the intent's handle — the same string the Recents tab
+     calls back with — at once when the engine is registered, and on a
+     cold launch (the tap started the app) holds it until the engine
+     reports registered (the demo: until the welcome), dropping it with a
+     log line after 30 s rather than placing a surprise call later. A
+     Settings switch, **iPhone Recents** (default on, the previous
+     behaviour), drives `includesCallsInRecents` through the live
+     provider's configuration: off, nothing more is written and the
+     history is Dialler's Recents tab alone. The handler is unconditional,
+     so rows written before the switch was turned off still call back (iOS
+     offers no way to remove them). *Not done:* the deprecated
+     `INStartAudioCallIntent`, which iOS delivers to CallKit apps that have
+     no Intents extension and which forum reports handle instead — that is
+     the pre-iOS-13 path, not Apple's. Device only — the simulator has no
+     Phone app: warm call-back, cold call-back, call-back of an incoming
+     call's row, and the switch off then a call that does not appear.
+
 ### Much later (not scheduled)
 
 Kept here so the design intent is not lost and so existing references to the

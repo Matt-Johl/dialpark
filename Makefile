@@ -376,6 +376,8 @@ ios-typecheck:
 	  $(IOS_MODULE_PATHS) App/*.swift
 	cd ios/Dialler && $(SWIFT_CACHE_ENV) swiftc -typecheck -Xfrontend -disable-sandbox -parse-as-library -swift-version 5 -target $(IOS_TRIPLE) -sdk "$(IOS_SDK)" -module-cache-path "$${TMPDIR:-/tmp}/swift-modcache" \
 	  $(IOS_MODULE_PATHS) PushProvider/*.swift
+	cd ios/Dialler && $(SWIFT_CACHE_ENV) swiftc -typecheck -Xfrontend -disable-sandbox -parse-as-library -swift-version 5 -target $(IOS_TRIPLE) -sdk "$(IOS_SDK)" -module-cache-path "$${TMPDIR:-/tmp}/swift-modcache" \
+	  IntentsExtension/*.swift
 
 # Cross-compile libre/baresip/Opus/OpenSSL for iOS device, simulator and macOS
 # into ios/vendor/xcframeworks (required once before the app links

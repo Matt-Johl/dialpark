@@ -133,6 +133,12 @@ struct SettingsView: View {
             .frame(minHeight: 52)
             .overlay(alignment: .bottom) { Palette.hairline.frame(height: 1) }
             SettingsFooter("When this is on, a second caller rings while you’re on a call. When it’s off, they hear a busy tone.")
+            Toggle(isOn: $model.showsCallsInPhoneRecents) {
+                Text("iPhone Recents").font(.callout).foregroundStyle(Palette.ink)
+            }
+            .frame(minHeight: 52)
+            .overlay(alignment: .bottom) { Palette.hairline.frame(height: 1) }
+            SettingsFooter("When this is on, your Dialler calls also appear in the Phone app’s Recents, and calling back from there uses Dialler. When it’s off, they appear only in Dialler.")
         }
     }
 

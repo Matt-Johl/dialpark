@@ -22,6 +22,11 @@ struct ContentView: View {
         .toggleStyle(.greenSwitch)
         // A dialler://enrol link from the iOS Camera app.
         .onOpenURL { model.handle(url: $0) }
+        // A tap on one of our rows in the Phone app's Recents (SPEC §6 item
+        // 16): our Intents extension has answered the system's
+        // INStartCallIntent with "continue in app", and the system opens us
+        // with the intent in this activity; warm or a cold launch alike.
+        .onContinueUserActivity("INStartCallIntent") { model.callBack(activity: $0) }
         // Ringing is CallKit's UI alone (banner, lock screen, Recents). While
         // a call is ACTIVE and the app is in front, iOS shows only the green
         // status indicator, so the in-call controls are ours. The cover

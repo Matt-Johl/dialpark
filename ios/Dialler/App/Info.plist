@@ -39,6 +39,10 @@
 	<string>Dialler connects to your organisation’s call server on the office network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Dialler uses the microphone so the person you’re talking to can hear you.</string>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INStartCallIntent</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>voip</string>
