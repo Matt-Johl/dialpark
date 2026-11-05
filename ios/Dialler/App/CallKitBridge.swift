@@ -47,10 +47,18 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
     /// given up, so a refused one can be asked again on a new provider.
     private var pendingStarts: [String: (handle: String, displayName: String)] = [:]
     private var notificationTokens: [NSObjectProtocol] = []
+    /// Whether calls are written to the Phone app's Recents (Settings:
+    /// "iPhone Recents", SPEC §6 item 16). Part of the provider's
+    /// configuration, so a change is sent to the call daemon through the
+    /// configuration setter; the next call is written or not accordingly.
+    /// Rows already written stay, and `AppModel.callBack(activity:)` keeps
+    /// them callable whatever this says.
+    private(set) var includesCallsInRecents: Bool
 
-    override init() {
+    init(includesCallsInRecents: Bool) {
+        self.includesCallsInRecents = includesCallsInRecents
         Breadcrumb.drop("CallKit: creating the provider")
-        provider = CXProvider(configuration: Self.makeConfiguration())
+        provider = CXProvider(configuration: Self.makeConfiguration(includesCallsInRecents: includesCallsInRecents))
         super.init()
         provider.setDelegate(self, queue: .main)
         observer.setDelegate(self, queue: .main)
@@ -66,7 +74,27 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         Breadcrumb.drop("CallKit: audio session configured")
     }
 
-    private static func makeConfiguration() -> CXProviderConfiguration {
+    /// Change the Phone app Recents setting on the live provider. Main thread.
+    func set(includesCallsInRecents on: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard on != includesCallsInRecents else { return }
+        includesCallsInRecents = on
+        provider.configuration = Self.makeConfiguration(includesCallsInRecents: on)
+        onLog("callkit: calls \(on ? "will" : "will not") be written to the Phone app's Recents")
+    }
+
+    /// The one place a party's identity leaves the app for iOS: the Phone
+    /// app's Recents row, CallKit's call screen and the handle a Recents tap
+    /// hands back. Always the directory number, however the party was
+    /// spelt on the way in (SPEC §6 item 16, `CallController.callKitHandle`),
+    /// so no caller of this bridge can put a SIP URI in front of the user —
+    /// 10910 had two rows in the Phone app, "10910" and "sip:10910@dialpark",
+    /// before this (device, 2026-11-05).
+    private static func callKitHandle(_ value: String) -> CXHandle {
+        CXHandle(type: .generic, value: CallController.callKitHandle(of: value))
+    }
+
+    private static func makeConfiguration(includesCallsInRecents: Bool) -> CXProviderConfiguration {
         let config = CXProviderConfiguration()
         config.supportsVideo = false
         // Call waiting (plan Phase I): TWO call groups of ONE call each —
@@ -87,8 +115,12 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         // releases, relabelled — the app sees the same two actions.
         config.maximumCallGroups = 2
         config.maximumCallsPerCallGroup = 1
+        // A generic handle: a directory number, not a phone number the Phone
+        // app could dial itself (`callKitHandle`). A Recents row made from
+        // it comes back through our Intents extension as an INStartCallIntent
+        // with the same string (`AppModel.callBack(activity:)`).
         config.supportedHandleTypes = [.generic]
-        config.includesCallsInRecents = true
+        config.includesCallsInRecents = includesCallsInRecents
         return config
     }
 
@@ -107,7 +139,7 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         let retired = provider
         retired.setDelegate(nil, queue: nil)
         retired.invalidate()
-        provider = CXProvider(configuration: Self.makeConfiguration())
+        provider = CXProvider(configuration: Self.makeConfiguration(includesCallsInRecents: includesCallsInRecents))
         provider.setDelegate(self, queue: .main)
         onLog("callkit: provider rebuilt and registered afresh (\(reason))")
     }
@@ -243,7 +275,7 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         uuids[callID] = uuid
         callIDs[uuid] = callID
         roster.add(callID, .awaitingStart)
-        let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: handle))
+        let action = CXStartCallAction(call: uuid, handle: Self.callKitHandle(handle))
         action.contactIdentifier = displayName
         onLog("callkit: requesting outgoing call \(callID) to \(handle) as \(short(uuid))")
         controller.request(CXTransaction(action: action)) { [weak self] err in
@@ -340,7 +372,7 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
             uuids[callID] = uuid
             callIDs[uuid] = callID
             roster.add(callID, .awaitingReport)
-            let update = callUpdate(handle: CXHandle(type: .generic, value: handle), name: displayName)
+            let update = callUpdate(handle: Self.callKitHandle(handle), name: displayName)
             lastUpdate[uuid] = update
             onLog("callkit: reporting \(callID) as \(short(uuid)) (app \(appState))")
             provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in

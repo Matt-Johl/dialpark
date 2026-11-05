@@ -12,7 +12,7 @@ phases; this file is the map of the repo.
 | [`server/`](server/) | Go light server: signal gateway, enrolment, registry, routing, directory API, and the **sipgo + diago** app-leg SIP element (registrar, wake-then-bridge call controller, media proxied through the server) | Phase 1 server half ✔ |
 | [`ios/DiallerProtocol/`](ios/DiallerProtocol/) | Swift package: envelope, bodies, framing, shared golden fixtures with Go | Phase 0 ✔ |
 | [`ios/DiallerCore/`](ios/DiallerCore/) | Swift package: TLS signal transport, session machine, call controller, config store, directory client, all behind fakes | Phase 1 ✔ (12 tests) |
-| [`ios/Dialler/`](ios/Dialler/) | Xcode project: SwiftUI app + CallKit + PushKit, and the `NEAppPushProvider` extension | rings on device, Local Push saves |
+| [`ios/Dialler/`](ios/Dialler/) | Xcode project: SwiftUI app + CallKit + PushKit, the `NEAppPushProvider` extension, and the Intents extension that answers a call-back from the Phone app's Recents | rings on device, Local Push saves |
 | [`ios/DiallerEngine/`](ios/DiallerEngine/) | baresip-backed `CallEngine` over XCFrameworks built by [`ios/vendor/build-baresip.sh`](ios/vendor/build-baresip.sh) | builds for device + simulator; first real call pending |
 | [`website/`](website/) | Product site: `index.html` and `privacy.html` (the app's privacy policy), sharing `style.css` and `site.js`; the app's Hairline palette, light and dark; static, no build step | draft |
 | [`harness/`](harness/) | Docker: Asterisk peer, SIPp conformance, headless baresip phones, end-to-end call test | passing |

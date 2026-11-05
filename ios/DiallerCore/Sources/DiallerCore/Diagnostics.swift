@@ -1,7 +1,8 @@
 import Foundation
 
 /// A persistent, rotating, line-oriented log in the App Group container,
-/// shared by the app and the extension (one file each). What the in-app
+/// shared by the app and its extensions (one file each: `app`, `extension`,
+/// `intents`). What the in-app
 /// log view shows is lost with the process; this survives a crash or a
 /// kill and is uploaded to the dev server on the next launch
 /// (`DiagnosticsClient`), so the lines that explain a termination are on
@@ -19,7 +20,7 @@ public final class FileLog: @unchecked Sendable {
         return f
     }()
 
-    /// `name` is the file's stem (`app`, `extension`). Nil when the App
+    /// `name` is the file's stem (`app`, `extension`, `intents`). Nil when the App
     /// Group container is unavailable (misconfigured entitlements).
     public init?(name: String, appGroup: String = DiallerIDs.appGroup, maxBytes: Int = 2_000_000) {
         guard let dir = FileLog.directory(appGroup: appGroup) else { return nil }
