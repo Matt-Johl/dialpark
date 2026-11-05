@@ -35,9 +35,15 @@ final class DemoCallTests: XCTestCase {
         }
     }
 
+    /// A demo contact's number by name, so the tests follow the directory
+    /// rather than pinning numbers that move (they moved to four digits on
+    /// 2026-11-05).
+    private func demoNumber(_ name: String) throws -> String {
+        try XCTUnwrap(Demo.contacts.first { $0.name == name }?.number, "\(name) is in the demo directory")
+    }
+
     func testAnOutgoingCallRingsConnectsAndEchoesOnlyOnceCallKitHasTheAudio() throws {
-        let amara = try XCTUnwrap(Demo.contacts.first?.number) // a demo contact, whatever its number
-        let id = try XCTUnwrap(controller.startCall(to: amara))
+        let id = try XCTUnwrap(controller.startCall(to: try demoNumber("Amara Nwosu")))
         controller.userStarted(callID: id)
         runScript()
         XCTAssertEqual(ui.connecting, [id], "ringing")
@@ -73,7 +79,7 @@ final class DemoCallTests: XCTestCase {
     }
 
     func testHoldStopsTheEchoAndResumeStartsIt() throws {
-        let id = try XCTUnwrap(controller.startCall(to: "231"))
+        let id = try XCTUnwrap(controller.startCall(to: try demoNumber("Daniel Okafor")))
         controller.userStarted(callID: id)
         runScript()
         engine.audioSessionActivated()
@@ -83,7 +89,7 @@ final class DemoCallTests: XCTestCase {
     }
 
     func testDeactivationStopsTheEcho() throws {
-        let id = try XCTUnwrap(controller.startCall(to: "231"))
+        let id = try XCTUnwrap(controller.startCall(to: try demoNumber("Daniel Okafor")))
         controller.userStarted(callID: id)
         runScript()
         engine.audioSessionActivated()
@@ -93,7 +99,7 @@ final class DemoCallTests: XCTestCase {
 
     /// A hang-up before the far end answers: its script must not revive it.
     func testACancelledCallStaysCancelled() throws {
-        let id = try XCTUnwrap(controller.startCall(to: "118"))
+        let id = try XCTUnwrap(controller.startCall(to: try demoNumber("Priya Shah")))
         controller.userStarted(callID: id)
         controller.userEnded(callID: id)
         runScript()

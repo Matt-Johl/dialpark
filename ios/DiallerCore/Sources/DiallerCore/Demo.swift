@@ -21,18 +21,14 @@ public enum Demo {
     }
 
     /// The demo phone's own line.
-    public static let line = "200"
+    public static let line = "2000"
     static let domain = "demo.dialler"
 
     /// A contact whose calls are always busy, so the busy tone and a
     /// "Busy" in Recents can be seen too.
-    public static let busyNumber = "299"
+    public static let busyNumber = "2990"
 
-    /// Who rings when the demo is asked for an incoming call. Not a three
-    /// digit number: the Phone app applies the carrier's number rules to a
-    /// CallKit handle, and 100 is the voicemail access number on Matt's
-    /// network, so Reception's row there read "Voicemail" (device,
-    /// 2026-11-05).
+    /// Who rings when the demo is asked for an incoming call.
     public static let caller = (name: "Reception", number: "1000")
 
     public struct Contact: Sendable {
@@ -45,14 +41,20 @@ public enum Demo {
 
     /// The demo directory as it starts. Fictitious people; the one outside
     /// number is from Ofcom's range reserved for drama (07700 900xxx).
+    /// Every extension, the demo's own line and the busy line included, is
+    /// four digits: the Phone app applies the carrier's number rules to a
+    /// CallKit handle it can read as a number, and three digit extensions
+    /// collide with carrier and emergency codes — 100 was the voicemail
+    /// access number on the test network ("Voicemail" in its Recents) and
+    /// 112 is the emergency number (device, 2026-11-05).
     public static let contacts: [Contact] = [
-        Contact(name: "Amara Nwosu", number: "1120", favourite: true), // not 112: the emergency number, which iOS treats as such
-        Contact(name: "Ben Hartley", number: "215", favourite: false),
-        Contact(name: "Daniel Okafor", number: "231", favourite: true),
-        Contact(name: "Facilities", number: "320", favourite: false),
-        Contact(name: "IT Helpdesk", number: "300", favourite: false),
-        Contact(name: "Marta Lindqvist", number: "142", favourite: false),
-        Contact(name: "Priya Shah", number: "118", favourite: false),
+        Contact(name: "Amara Nwosu", number: "1120", favourite: true),
+        Contact(name: "Ben Hartley", number: "2150", favourite: false),
+        Contact(name: "Daniel Okafor", number: "2310", favourite: true),
+        Contact(name: "Facilities", number: "3200", favourite: false),
+        Contact(name: "IT Helpdesk", number: "3000", favourite: false),
+        Contact(name: "Marta Lindqvist", number: "1420", favourite: false),
+        Contact(name: "Priya Shah", number: "1180", favourite: false),
         Contact(name: caller.name, number: caller.number, favourite: false),
         Contact(name: "Sales Line", number: busyNumber, favourite: false),
         Contact(name: "Sam Carter", number: "+447700900123", favourite: false),
