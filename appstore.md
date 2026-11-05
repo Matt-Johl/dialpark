@@ -110,11 +110,11 @@ calls are simulated on the phone and nothing leaves it.
   server field can stay empty), or a QR carrying that code. Sign Out
   leaves the demo and clears its calls from Recents.
 - **What it does:**
-  - The line is Ext 200, with a ten-contact directory; adding, editing,
+  - The line is Ext 2000, with a ten-contact directory; adding, editing,
     deleting and favourites all work.
   - An outgoing call to anyone rings, connects and plays the caller's
     voice back 120 ms late, as the server's echo path does (an echo test);
-    calls to Sales Line (299) are always busy.
+    calls to Sales Line (2990) are always busy.
   - Settings › Receive a Demo Call rings from Reception through CallKit a
     few seconds later.
 - **How it is built:** stand-ins behind the protocols the app already uses,
@@ -139,7 +139,7 @@ calls are simulated on the phone and nothing leaves it.
 > 1. Launch the app and tap **Enter Code Manually**.
 > 2. Leave Server empty, enter the code **DEMODEMO**, and tap **Continue**.
 >
-> The app then runs with a simulated line (Ext 200) and company directory.
+> The app then runs with a simulated line (Ext 2000) and company directory.
 > Calls are simulated on the device: call any contact or number from the
 > Keypad, Directory or Recents and the call rings, connects and plays your
 > voice back (an echo test). Calls to "Sales Line" are always busy. For an
