@@ -1865,7 +1865,9 @@ on by config — see §7.4.
      or it is not written. The change: a third target, `IntentsExtension`
      (`com.apple.intents-service`, `IntentsSupported` = `INStartCallIntent`),
      whose handler fails an intent without a handle and otherwise continues
-     in the app, as Apple's does; `AppModel.callBack(activity:)` behind
+     in the app, as Apple's does, writing each decision to the App Group's
+     `logs/intents.log`, uploaded by the app as `intents-log` beside the
+     app and extension logs; `AppModel.callBack(activity:)` behind
      `ContentView.onContinueUserActivity("INStartCallIntent")` (Info.plist
      `NSUserActivityTypes` lists the type, as SwiftUI's documentation
      requires) dials the intent's handle — the same string the Recents tab

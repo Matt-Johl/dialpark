@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- The IntentsExtension's privacy manifest. No tracking, no data
-     collected, no required-reason API: it reads one intent and answers. -->
+     collected. It links DiallerCore for the App Group file log, and that
+     library reads the App Group's UserDefaults (1C8F.1), the same
+     declaration as PushProvider's. -->
 <plist version="1.0">
 <dict>
 	<key>NSPrivacyTracking</key>
@@ -11,6 +13,15 @@
 	<key>NSPrivacyCollectedDataTypes</key>
 	<array/>
 	<key>NSPrivacyAccessedAPITypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>1C8F.1</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

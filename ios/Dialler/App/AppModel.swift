@@ -1314,6 +1314,9 @@ final class AppModel: ObservableObject {
         if let ext = FileLog(name: "extension"), let data = ext.drain() {
             DiagnosticsClient.enqueue(kind: "extension-log", name: reason, data: data)
         }
+        if let intents = FileLog(name: "intents"), let data = intents.drain() {
+            DiagnosticsClient.enqueue(kind: "intents-log", name: reason, data: data)
+        }
         let client = DiagnosticsClient(base: cfg.httpBase(), deviceID: cfg.deviceID, token: cfg.token,
                                        acceptAnyCertificate: cfg.gateway.acceptAnyCertificate, certSHA256: cfg.gateway.certSHA256)
         let result = await client.flush()

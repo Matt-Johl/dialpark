@@ -349,11 +349,15 @@ IOS_MODULE_PATHS = -I "$(IOS_SCRATCH)/debug" \
   $(IOS_CMODULE_MAPS)
 # The C module (CBaresip) is reached through a module map, and the newer
 # toolchain generates it as `<Module>.modulemap` rather than the
-# `module.modulemap` that -I looks for — so point swiftc straight at each
-# one. Empty on the older layout, where -I above is enough.
-IOS_CMODULE_MAPS = $(foreach m,\
-  $(wildcard $(TMPDIR)/spm-build-ios/out/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CBaresip.modulemap),\
-  -Xcc -fmodule-map-file=$(m))
+# `module.modulemap` that -I looks for — so point swiftc straight at it.
+# Empty on the older layout, where -I above is enough. The test is the
+# shell's, at the moment the swiftc line runs: a make `$(wildcard)` here
+# was evaluated against make's directory cache, which does not see a file
+# the `swift build` line of the same recipe has just produced (GNU make
+# 3.81), so the first run after a toolchain update or a clean scratch
+# directory failed with "missing required module 'CBaresip'" (2026-11-05).
+IOS_CMODULE_MAPS = $$(m="$(IOS_SCRATCH)/out/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CBaresip.modulemap"; \
+  [ -f "$$m" ] && printf -- '-Xcc -fmodule-map-file=%s' "$$m")
 
 # Package tests on macOS (no device).
 # --disable-sandbox: SwiftPM wraps the build in its own sandbox-exec, which
@@ -377,7 +381,7 @@ ios-typecheck:
 	cd ios/Dialler && $(SWIFT_CACHE_ENV) swiftc -typecheck -Xfrontend -disable-sandbox -parse-as-library -swift-version 5 -target $(IOS_TRIPLE) -sdk "$(IOS_SDK)" -module-cache-path "$${TMPDIR:-/tmp}/swift-modcache" \
 	  $(IOS_MODULE_PATHS) PushProvider/*.swift
 	cd ios/Dialler && $(SWIFT_CACHE_ENV) swiftc -typecheck -Xfrontend -disable-sandbox -parse-as-library -swift-version 5 -target $(IOS_TRIPLE) -sdk "$(IOS_SDK)" -module-cache-path "$${TMPDIR:-/tmp}/swift-modcache" \
-	  IntentsExtension/*.swift
+	  $(IOS_MODULE_PATHS) IntentsExtension/*.swift
 
 # Cross-compile libre/baresip/Opus/OpenSSL for iOS device, simulator and macOS
 # into ios/vendor/xcframeworks (required once before the app links

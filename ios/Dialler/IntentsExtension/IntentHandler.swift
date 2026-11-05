@@ -1,3 +1,4 @@
+import DiallerCore
 import Intents
 import os
 
@@ -18,16 +19,28 @@ import os
 /// call, otherwise continue in the app. Siri's "call … with Dialler" would
 /// arrive here too, but resolving a spoken name against the directory is
 /// not built; Recents rows arrive with their handle already resolved.
+///
+/// Each decision is written to `logs/intents.log` in the App Group, which
+/// the app uploads with its own log (`AppModel.sendDiagnostics`), so a tap
+/// that opened the app and dialled nothing shows whether the extension
+/// ever ran — the console-only line it had before was not in any upload
+/// when that question came up on 2026-11-05.
 final class IntentHandler: INExtension, INStartCallIntentHandling {
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "IntentsExtension", category: "intents")
+    private let logger = Logger(subsystem: DiallerIDs.bundlePrefix, category: "intents")
+    private let fileLog = FileLog(name: "intents")
+
+    private func note(_ line: String) {
+        logger.notice("\(line, privacy: .public)")
+        fileLog?.write(line)
+    }
 
     func handle(intent: INStartCallIntent, completion: @escaping (INStartCallIntentResponse) -> Void) {
         guard let handle = intent.contacts?.first?.personHandle?.value, !handle.isEmpty else {
-            logger.notice("start call intent without a handle: failure")
+            note("start call intent without a handle: failure")
             completion(INStartCallIntentResponse(code: .failure, userActivity: nil))
             return
         }
-        logger.notice("start call intent for \(handle, privacy: .public): continuing in the app")
+        note("start call intent for \(handle): continuing in the app")
         let activity = NSUserActivity(activityType: String(describing: INStartCallIntent.self))
         completion(INStartCallIntentResponse(code: .continueInApp, userActivity: activity))
     }

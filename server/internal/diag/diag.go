@@ -21,7 +21,7 @@ const MaxBytes = 8 << 20
 
 // Handler serves POST /v1/diag: the body is stored verbatim under
 // <dir>/<device>/<UTC time>-<kind>[-<name>].<ext>. Headers: X-Diag-Kind
-// (app-log, extension-log, metrickit, ips, …; required), X-Diag-Name
+// (app-log, extension-log, intents-log, metrickit, ips, …; required), X-Diag-Name
 // (optional). The device id comes from X-Device-ID, verified by deviceAuth.
 func Handler(dir string, deviceAuth func(http.Handler) http.Handler, log *slog.Logger) http.Handler {
 	if log == nil {

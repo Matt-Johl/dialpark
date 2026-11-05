@@ -14,6 +14,7 @@
 		D1A11E700000000000000105 /* PushProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D1A11E700000000000000202 /* PushProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D1A11E700000000000000106 /* DiallerEngine in Frameworks */ = {isa = PBXBuildFile; productRef = D1A11E700000000000000505 /* DiallerEngine */; };
 		D1A11E700000000000000107 /* IntentsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D1A11E700000000000000203 /* IntentsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D1A11E700000000000000108 /* DiallerCore in Frameworks */ = {isa = PBXBuildFile; productRef = D1A11E700000000000000506 /* DiallerCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -129,6 +130,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D1A11E700000000000000108 /* DiallerCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -228,6 +230,7 @@
 			);
 			name = IntentsExtension;
 			packageProductDependencies = (
+				D1A11E700000000000000506 /* DiallerCore */,
 			);
 			productName = IntentsExtension;
 			productReference = D1A11E700000000000000203 /* IntentsExtension.appex */;
@@ -518,6 +521,7 @@
 		D1A11E700000000000001007 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = IntentsExtension/IntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 568U7M6YTX;
@@ -540,6 +544,7 @@
 		D1A11E700000000000001008 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = IntentsExtension/IntentsExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 568U7M6YTX;
@@ -640,6 +645,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D1A11E700000000000000403 /* XCLocalSwiftPackageReference "../DiallerEngine" */;
 			productName = DiallerEngine;
+		};
+		D1A11E700000000000000506 /* DiallerCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1A11E700000000000000401 /* XCLocalSwiftPackageReference "../DiallerCore" */;
+			productName = DiallerCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
