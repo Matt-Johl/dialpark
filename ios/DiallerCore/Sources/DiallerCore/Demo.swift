@@ -46,7 +46,7 @@ public enum Demo {
     /// The demo directory as it starts. Fictitious people; the one outside
     /// number is from Ofcom's range reserved for drama (07700 900xxx).
     public static let contacts: [Contact] = [
-        Contact(name: "Amara Nwosu", number: "112", favourite: true),
+        Contact(name: "Amara Nwosu", number: "1120", favourite: true), // not 112: the emergency number, which iOS treats as such
         Contact(name: "Ben Hartley", number: "215", favourite: false),
         Contact(name: "Daniel Okafor", number: "231", favourite: true),
         Contact(name: "Facilities", number: "320", favourite: false),
