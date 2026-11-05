@@ -1867,7 +1867,15 @@ on by config — see §7.4.
      whose handler fails an intent without a handle and otherwise continues
      in the app, as Apple's does, writing each decision to the App Group's
      `logs/intents.log`, uploaded by the app as `intents-log` beside the
-     app and extension logs; `AppModel.callBack(activity:)` behind
+     app and extension logs. The handle CallKit is given — the Phone app's
+     row, its call screen, and what a tap hands back — is always the
+     directory number (`CallController.callKitHandle`, applied once in the
+     bridge), so a party arriving as "sip:10910@dialpark" from an INVITE or
+     the Recents tab and as "10910" from the keypad is one row, and a
+     trunk caller's "sip:30933@10.7.160.11" is "30933", called back the
+     way the keypad dials it; a non-numeric user keeps its host. The
+     app's own screens already showed numbers (`numberPart`); CallKit was
+     the one place a URI still reached the user (device, 2026-11-05); `AppModel.callBack(activity:)` behind
      `ContentView.onContinueUserActivity("INStartCallIntent")` (Info.plist
      `NSUserActivityTypes` lists the type, as SwiftUI's documentation
      requires) dials the intent's handle — the same string the Recents tab

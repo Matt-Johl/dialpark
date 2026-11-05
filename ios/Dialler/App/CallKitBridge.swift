@@ -83,6 +83,17 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         onLog("callkit: calls \(on ? "will" : "will not") be written to the Phone app's Recents")
     }
 
+    /// The one place a party's identity leaves the app for iOS: the Phone
+    /// app's Recents row, CallKit's call screen and the handle a Recents tap
+    /// hands back. Always the directory number, however the party was
+    /// spelt on the way in (SPEC §6 item 16, `CallController.callKitHandle`),
+    /// so no caller of this bridge can put a SIP URI in front of the user —
+    /// 10910 had two rows in the Phone app, "10910" and "sip:10910@dialpark",
+    /// before this (device, 2026-11-05).
+    private static func callKitHandle(_ value: String) -> CXHandle {
+        CXHandle(type: .generic, value: CallController.callKitHandle(of: value))
+    }
+
     private static func makeConfiguration(includesCallsInRecents: Bool) -> CXProviderConfiguration {
         let config = CXProviderConfiguration()
         config.supportsVideo = false
@@ -104,11 +115,10 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         // releases, relabelled — the app sees the same two actions.
         config.maximumCallGroups = 2
         config.maximumCallsPerCallGroup = 1
-        // A generic handle: the string is whatever the app dialled or the
-        // server reported (a user, digits or a SIP URI), not a phone number
-        // the Phone app could dial itself. A Recents row made from it comes
-        // back through our Intents extension as an INStartCallIntent with
-        // the same string (`AppModel.callBack(activity:)`).
+        // A generic handle: a directory number, not a phone number the Phone
+        // app could dial itself (`callKitHandle`). A Recents row made from
+        // it comes back through our Intents extension as an INStartCallIntent
+        // with the same string (`AppModel.callBack(activity:)`).
         config.supportedHandleTypes = [.generic]
         config.includesCallsInRecents = includesCallsInRecents
         return config
@@ -265,7 +275,7 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
         uuids[callID] = uuid
         callIDs[uuid] = callID
         roster.add(callID, .awaitingStart)
-        let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: handle))
+        let action = CXStartCallAction(call: uuid, handle: Self.callKitHandle(handle))
         action.contactIdentifier = displayName
         onLog("callkit: requesting outgoing call \(callID) to \(handle) as \(short(uuid))")
         controller.request(CXTransaction(action: action)) { [weak self] err in
@@ -362,7 +372,7 @@ final class CallKitBridge: NSObject, CallUI, CXProviderDelegate, CXCallObserverD
             uuids[callID] = uuid
             callIDs[uuid] = callID
             roster.add(callID, .awaitingReport)
-            let update = callUpdate(handle: CXHandle(type: .generic, value: handle), name: displayName)
+            let update = callUpdate(handle: Self.callKitHandle(handle), name: displayName)
             lastUpdate[uuid] = update
             onLog("callkit: reporting \(callID) as \(short(uuid)) (app \(appState))")
             provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in

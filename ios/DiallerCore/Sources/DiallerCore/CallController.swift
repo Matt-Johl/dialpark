@@ -928,6 +928,24 @@ public final class CallController {
         return up.split(separator: "@").first.map(String.init) ?? up
     }
 
+    /// The one string a party is known by outside the app (SPEC §6 item
+    /// 16): what CallKit writes to the Phone app's Recents and shows on its
+    /// call screen, and what a Recents tap hands back to dial. The same
+    /// directory number the app's own screens show (`numberPart`), so
+    /// "sip:10910@dialpark" from an incoming INVITE, "10910" from the keypad
+    /// and "sip:30933@10.7.160.11" from a trunk caller are "10910", "10910"
+    /// and "30933": one row per party, and a call-back dials the number the
+    /// way the keypad would, completed with the account's domain and routed
+    /// by the server. A user part that is not dialable — a name, which SIP
+    /// allows and this system does not produce — keeps its host so a
+    /// call-back still routes.
+    public static func callKitHandle(of uri: String) -> String {
+        let number = numberPart(of: uri)
+        let dialable = CharacterSet(charactersIn: "0123456789+*#")
+        if !number.isEmpty, number.unicodeScalars.allSatisfy(dialable.contains) { return number }
+        return userPart(of: uri)
+    }
+
     private func end(callID: String, reason: CallEndReason) {
         let call: TrackedCall? = lock.withLock {
             defer { calls[callID] = nil }

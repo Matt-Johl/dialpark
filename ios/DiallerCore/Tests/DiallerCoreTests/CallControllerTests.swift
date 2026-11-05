@@ -541,6 +541,25 @@ final class CallControllerTests: XCTestCase {
         XCTAssertEqual(CallController.numberPart(of: "sip:101@10.18.0.5;transport=udp"), "101")
         XCTAssertEqual(CallController.numberPart(of: "201"), "201")
     }
+
+    /// SPEC §6 item 16: the handle CallKit writes to the Phone app is the
+    /// directory number whatever spelling the party arrived under, so one
+    /// party is one row; a non-numeric user keeps its host for routing.
+    func testCallKitHandleIsTheDirectoryNumber() {
+        let cases: [(String, String)] = [
+            ("10910", "10910"),                                   // keypad
+            ("sip:10910@dialpark", "10910"),                      // the Recents tab's stored URI, an incoming INVITE
+            ("sip:10910@dialpark;transport=tls", "10910"),        // with transport parameter
+            ("\"Alice\" <sip:1001@pbx>;tag=x", "1001"),          // a From header
+            ("sip:30933@10.7.160.11;transport=udp", "30933"),     // a trunk caller via the PBX
+        ]
+        for (uri, want) in cases {
+            XCTAssertEqual(CallController.callKitHandle(of: uri), want, uri)
+        }
+        XCTAssertEqual(CallController.callKitHandle(of: "sip:+441632960000@10.7.160.11"), "+441632960000", "an external number keeps its plus")
+        XCTAssertEqual(CallController.callKitHandle(of: "*72"), "*72", "feature codes are dialable")
+        XCTAssertEqual(CallController.callKitHandle(of: "sip:alice@example.com"), "alice@example.com", "a named user keeps its host so a call-back routes")
+    }
 }
 
 // Call waiting (plan Phase I): a second incoming call while one is up rings
