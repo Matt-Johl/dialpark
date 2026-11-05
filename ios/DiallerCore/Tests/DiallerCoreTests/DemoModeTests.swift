@@ -36,7 +36,8 @@ final class DemoCallTests: XCTestCase {
     }
 
     func testAnOutgoingCallRingsConnectsAndEchoesOnlyOnceCallKitHasTheAudio() throws {
-        let id = try XCTUnwrap(controller.startCall(to: "112"))
+        let amara = try XCTUnwrap(Demo.contacts.first?.number) // a demo contact, whatever its number
+        let id = try XCTUnwrap(controller.startCall(to: amara))
         controller.userStarted(callID: id)
         runScript()
         XCTAssertEqual(ui.connecting, [id], "ringing")
