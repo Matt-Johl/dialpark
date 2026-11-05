@@ -1903,36 +1903,51 @@ on by config — see §7.4.
      Phone app: warm call-back, cold call-back, call-back of an incoming
      call's row, and the switch off then a call that does not appear.
 
-  17. **Siri example phrases, and whether Siri may call by name (app;
-     noted 2026-11-05).** Declaring `INStartCallIntent` in the Intents
-     extension (item 16) tells Apple the app can be driven by Siri, and
-     every App Store upload since answers with ITMS-90626, "no example
-     phrase was provided for INStartCallIntent in the 'en' language" — an
-     advisory, delivery succeeds. Apple wants `AppIntentVocabulary.plist`
-     in the iOS app bundle's development-language folder
-     (`App/en.lproj/`), root key `IntentPhrases`: an array of
-     `{IntentName, IntentExamples}` dictionaries; the phrases are shown
-     to users in the Siri guide, so they are a promise of what the app
-     does. Today the extension continues into the app only when the
-     intent arrives with a handle already resolved (a Recents row, or
-     spoken digits); it does not resolve a spoken name, so "Call
-     Reception with Dialler" would end with Siri saying it cannot.
-     Two options, decision deferred to when this is picked up:
-     1. *Phrases that already work.* Number phrases only — "Call 2310
-        with ${applicationName}" — one plist file, nothing else. Clears
-        the warning on the next upload and promises only what the app
-        does.
-     2. *Siri calling by name.* The extension implements
-        `INStartCallIntentHandling`'s contact resolution against the
-        directory, which lives in the App Group (`directory/book.json`)
-        and is readable from an extension; phrases may then use names.
-        Needs matching rules (display name, favourites first,
-        disambiguation when two match), the `resolve`/`confirm` steps,
-        and device testing with Siri; a SPEC §4 note on what Siri is
-        told about a party. Siri's own recognition of custom names would
-        use `INVocabulary` contact-name registration from the app.
-     Either way the file is app-only and localised; the extension's
-     Info.plist is unchanged.
+  17. **Siri calls by name (app; noted and decided 2026-11-05: option 2).**
+     Declaring `INStartCallIntent` in the Intents extension (item 16) told
+     Apple the app can be driven by Siri, and every App Store upload
+     answered with ITMS-90626, "no example phrase was provided for
+     INStartCallIntent in the 'en' language" — an advisory. The phrases
+     are a promise of what the app does, so the choice was between number
+     phrases that already worked and Siri calling by name; Matt chose the
+     latter. *What it is:* Siri's `INStartCallIntent` arrives at the
+     extension with a party named but without a handle; the extension
+     resolves it against the directory and continues in the app as a
+     Recents tap does. `SiriContactMatcher` (DiallerCore, table-tested)
+     holds the rules: digits, however paused, are a number, not a lookup;
+     a whole-name match, case and accent insensitive, wins; otherwise
+     every spoken word must begin a word of the name, in any order
+     ("Amara", "Okafor", "sales"); one hit is the party, several are
+     offered favourites first for Siri to ask, none is "no contact found";
+     deleted contacts are never offered. The directory it reads is the App
+     Group's `directory/book.json`, which the app writes after every
+     change from the server or the user (a change made while the app is
+     closed lands at its next launch). Video is refused with Apple's
+     video-unsupported reason; emergency and voicemail destinations are
+     the carrier's and refused; external contacts resolve like any other
+     and dial through the trunk as from the Directory tab. *App side:*
+     the Siri entitlement, which the App Store requires of an app whose
+     Intents extension handles Siri requests (the Siri capability must be
+     enabled on the App ID under Signing & Capabilities);
+     `NSSiriUsageDescription`; Siri authorisation asked where the
+     microphone is, once the phone is set up (Apple: the app must be
+     authorised before Siri may call on its extension); the directory's
+     names registered as Siri contact vocabulary from the app, favourites
+     first, each time the book changes, removed at Sign Out (Apple:
+     register contact names only when the app manages them itself, as it
+     does); `App/en.lproj/AppIntentVocabulary.plist` with three example
+     phrases for the Siri guide, which also clears the advisory. The
+     extension's Info.plist is unchanged. *Verification:* the matcher's
+     table; the built app bundle carries `en.lproj/AppIntentVocabulary.plist`;
+     on the device, Siri allowed → "Call Reception with Dialler" rings
+     1000, "Call Daniel with Dialler" makes Siri ask which Daniel, "Call
+     Priya with Dialler" (not in the directory) is refused, "Call 2310
+     with Dialler" dials the number; Siri denied → the extension is never
+     reached and Recents call-back still works; `intents.log` in the
+     diagnostics shows each resolve. The next App Store upload must not
+     carry ITMS-90626. Known limits: Siri ingests registered names with a
+     delay of minutes; recognition of four-digit extensions varies by
+     accent; the phrases are English only until localised.
 
 ### Much later (not scheduled)
 

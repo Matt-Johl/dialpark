@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Siri's example phrases for the app (SPEC §6 item 17): shown in the Siri
+     guide and sent to Siri with each App Store upload; App Store Connect
+     warns (ITMS-90626) when an app with an Intents extension has none. The
+     names are the demo directory's; a real directory's names resolve the
+     same way (IntentsExtension/IntentHandler.swift). -->
+<plist version="1.0">
+<dict>
+	<key>IntentPhrases</key>
+	<array>
+		<dict>
+			<key>IntentName</key>
+			<string>INStartCallIntent</string>
+			<key>IntentExamples</key>
+			<array>
+				<string>Call Reception with ${applicationName}</string>
+				<string>Call Amara Nwosu using ${applicationName}</string>
+				<string>Call 2310 with ${applicationName}</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

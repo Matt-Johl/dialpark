@@ -147,6 +147,11 @@ calls are simulated on the phone and nothing leaves it.
 > Reception rings through CallKit a few seconds later. **Sign Out** in
 > Settings leaves the demo.
 >
+> Siri: with Siri allowed for the app, "Hey Siri, call Reception with
+> Dialler" starts the same demo call; "call Daniel with Dialler" makes Siri
+> ask which Daniel (two are in the directory); "call 2310 with Dialler"
+> dials the number.
+>
 > Background calls, which reach the phone over the office Wi-Fi through
 > Local Push Connectivity while the app is closed, need the organisation's
 > server and network and cannot be shown in the demo.

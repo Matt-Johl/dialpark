@@ -740,6 +740,8 @@ final class AppModel: ObservableObject {
         bookStore?.clear()
         book.reset()
         publishBook()
+        INVocabulary.shared().removeAllVocabularyStrings() // the names were this enrolment's
+        siriVocabulary = []
         host = ""
         deviceID = ""
         token = ""
@@ -853,6 +855,7 @@ final class AppModel: ObservableObject {
         // Asked here, once the phone is set up, not at first launch before
         // setup (appstore.md, must-fix 8); a no-op once answered.
         callKit.requestMicrophonePermission()
+        requestSiriAuthorization()
         // The SIP leg trusts the certificate the gateway connection trusts:
         // the one pinned at enrolment (SPEC §4.8), self-signed or not.
         engine.setServerTrust(pin: cfg.gateway.certSHA256, acceptAnyCertificate: cfg.gateway.acceptAnyCertificate)
@@ -896,6 +899,7 @@ final class AppModel: ObservableObject {
 
     private func connectDemo() {
         callKit.requestMicrophonePermission()
+        requestSiriAuthorization()
         disconnect()
         // The demo directory is rebuilt from its seed on every start
         // (`DemoDirectory`), numbering the same ten contacts 1…10 each time,
@@ -1131,6 +1135,48 @@ final class AppModel: ObservableObject {
         contacts = book.sorted
         nameIndex.update(contacts)
         bookStore?.save(book)
+        registerSiriVocabulary()
+    }
+
+    // MARK: Siri (SPEC §6 item 17)
+
+    /// Siri may hand our Intents extension a call only once the user has
+    /// allowed it (Apple: "An iOS app must request authorization to use
+    /// SiriKit before Siri or Maps are allowed to call on its Intents
+    /// extension"). Asked where the microphone is: once the phone is set
+    /// up, a no-op once answered. The Recents call-back (item 16) does not
+    /// go through Siri and never needed this.
+    private func requestSiriAuthorization() {
+        switch INPreferences.siriAuthorizationStatus() {
+        case .authorized:
+            registerSiriVocabulary()
+        case .notDetermined:
+            INPreferences.requestSiriAuthorization { [weak self] status in
+                Task { @MainActor in
+                    self?.append("siri: \(status == .authorized ? "allowed" : "not allowed (\(status.rawValue))")")
+                    if status == .authorized { self?.registerSiriVocabulary() }
+                }
+            }
+        case .denied, .restricted:
+            append("siri: not allowed; Settings › Siri & Search")
+        @unknown default:
+            break
+        }
+    }
+
+    /// The directory's names, favourites first, so Siri recognises "Call
+    /// Amara with Dialler" (Apple: register contact names only when the app
+    /// manages them itself, as this one does — they are not in Contacts).
+    /// Registered from the app, never the extension, each time the book
+    /// changes; the last list is kept so an unchanged book is not re-sent.
+    private var siriVocabulary: [String] = []
+    private func registerSiriVocabulary() {
+        guard INPreferences.siriAuthorizationStatus() == .authorized else { return }
+        let names = (book.favourites + contacts.filter { !$0.isFavourite }).map(\.displayName)
+        guard names != siriVocabulary else { return }
+        siriVocabulary = names
+        INVocabulary.shared().setVocabularyStrings(NSOrderedSet(array: names), of: .contactName)
+        append("siri: \(names.count) directory names registered")
     }
 
     var favourites: [DirectoryContact] { contacts.filter(\.isFavourite) }
