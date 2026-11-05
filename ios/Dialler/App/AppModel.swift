@@ -897,15 +897,14 @@ final class AppModel: ObservableObject {
     private func connectDemo() {
         callKit.requestMicrophonePermission()
         disconnect()
-        // The demo directory is rebuilt from its seed on every start
-        // (`DemoDirectory`), numbering the same ten contacts 1…10 each time,
-        // so a book saved by an earlier run sits at the same version and a
-        // sync finds nothing to apply: a build with a new seed kept showing
-        // the old numbers until Sign Out cleared the book (device,
-        // 2026-11-05). The demo starts from its seed, so its book does too:
-        // version 0, and the welcome's sync is a full one.
-        book.reset()
-        publishBook()
+        // The saved book is kept, as on the real server. The demo directory
+        // is built into it once, by the welcome's full sync when the book is
+        // empty — first entry into the demo, or after Sign Out — and never
+        // rebuilt on connect: emptying it here and leaving the refill to the
+        // welcome left the book empty for the gap in between, and a
+        // call-back held across a cold launch dialled in that gap and showed
+        // a number where the directory had a name (device, 2026-11-05). A
+        // changed demo seed in a new build shows after a Sign Out.
         let gateway = DemoGateway()
         demoGateway = gateway
         start(gateway, hello: Demo.hello, status: "demo")

@@ -35,24 +35,20 @@ final class DemoCallTests: XCTestCase {
         }
     }
 
-    /// Why the app resets its book when the demo connects
-    /// (`AppModel.connectDemo`): a demo directory rebuilt from a changed
-    /// seed ends at the same version as the one before, so a book synced
-    /// from the old seed is never corrected by an incremental sync; from
-    /// version 0 it is.
-    func testABookFromAnOlderSeedIsOnlyRefreshedFromScratch() async throws {
+    /// The demo book is built once, from an empty book (first entry, or
+    /// after Sign Out), and then kept: a demo directory rebuilt from a
+    /// changed seed numbers its contacts the same way, so a later sync
+    /// leaves the saved book as it is. `AppModel.connectDemo` relies on
+    /// this and never empties the book itself.
+    func testTheDemoBookIsBuiltOnceAndThenKept() async throws {
         let old = [Demo.Contact(name: "Reception", number: "100", favourite: false)]
         let new = [Demo.Contact(name: "Reception", number: "1000", favourite: false)]
         var book = AddressBook()
         try await DemoDirectory(seed: old).sync(&book)
-        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"])
+        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"], "an empty book is built from the seed")
 
         try await DemoDirectory(seed: new).sync(&book)
-        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"], "same version, nothing applied: the stale copy survives an incremental sync")
-
-        book.reset()
-        try await DemoDirectory(seed: new).sync(&book)
-        XCTAssertEqual(book.sorted.map(\.uri), ["1000@demo.dialler"], "from version 0 the new seed arrives in full")
+        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"], "a built book is kept; a new seed shows after Sign Out")
     }
 
     /// A demo contact's number by name, so the tests follow the directory
