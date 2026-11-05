@@ -1903,6 +1903,37 @@ on by config — see §7.4.
      Phone app: warm call-back, cold call-back, call-back of an incoming
      call's row, and the switch off then a call that does not appear.
 
+  17. **Siri example phrases, and whether Siri may call by name (app;
+     noted 2026-11-05).** Declaring `INStartCallIntent` in the Intents
+     extension (item 16) tells Apple the app can be driven by Siri, and
+     every App Store upload since answers with ITMS-90626, "no example
+     phrase was provided for INStartCallIntent in the 'en' language" — an
+     advisory, delivery succeeds. Apple wants `AppIntentVocabulary.plist`
+     in the iOS app bundle's development-language folder
+     (`App/en.lproj/`), root key `IntentPhrases`: an array of
+     `{IntentName, IntentExamples}` dictionaries; the phrases are shown
+     to users in the Siri guide, so they are a promise of what the app
+     does. Today the extension continues into the app only when the
+     intent arrives with a handle already resolved (a Recents row, or
+     spoken digits); it does not resolve a spoken name, so "Call
+     Reception with Dialler" would end with Siri saying it cannot.
+     Two options, decision deferred to when this is picked up:
+     1. *Phrases that already work.* Number phrases only — "Call 2310
+        with ${applicationName}" — one plist file, nothing else. Clears
+        the warning on the next upload and promises only what the app
+        does.
+     2. *Siri calling by name.* The extension implements
+        `INStartCallIntentHandling`'s contact resolution against the
+        directory, which lives in the App Group (`directory/book.json`)
+        and is readable from an extension; phrases may then use names.
+        Needs matching rules (display name, favourites first,
+        disambiguation when two match), the `resolve`/`confirm` steps,
+        and device testing with Siri; a SPEC §4 note on what Siri is
+        told about a party. Siri's own recognition of custom names would
+        use `INVocabulary` contact-name registration from the app.
+     Either way the file is app-only and localised; the extension's
+     Info.plist is unchanged.
+
 ### Much later (not scheduled)
 
 Kept here so the design intent is not lost and so existing references to the
