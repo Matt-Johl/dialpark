@@ -1192,6 +1192,15 @@ on by config — see §7.4.
      record is written at `AppModel.callEnded`, which already has the
      tracked call's title, direction and `connectedAt`, fed by the status
      `CallController.handle(sipEnded:)` alone sees.
+     *Identity (2026-11-05):* a record is keyed by the controller's call
+     id and the store treats two records with one id as the same call,
+     which is right for a call seen first by INVITE and then by wake; but
+     the ids the controller invents for calls the server never named,
+     `out-N` and `sip-N`, restarted at 1 in every process, so the first
+     call after a relaunch evicted the previous run's first call from the
+     list. The app now gives the controller a per-launch token and local
+     ids read `out-<token>-N`; server ids were always unique. Ordering is
+     by end time, never by id, so nothing moves.
      *Storage:* `RecentsStore` in the App Group container (the `FileLog`
      directory is the precedent): `recents.json`, newest first, capped at
      500, written atomically. The extension never writes that file; for a

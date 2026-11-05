@@ -206,7 +206,10 @@ final class AppModel: ObservableObject {
         return echo
     }()
     @Published private(set) var engineState = "None"
-    private lazy var controller = CallController(ui: callKit, engine: engine, log: { [weak self] m in
+    /// One token per process, so this run's local call ids never match an
+    /// earlier run's in the Recents file (`CallController.runToken`).
+    private let runToken = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(6))
+    private lazy var controller = CallController(ui: callKit, engine: engine, runToken: runToken, log: { [weak self] m in
         Task { @MainActor in self?.append(m) }
     })
     /// The gateway session, kept up by `GatewaySession` (reconnects after a
