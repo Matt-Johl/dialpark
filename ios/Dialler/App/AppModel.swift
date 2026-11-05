@@ -434,7 +434,11 @@ final class AppModel: ObservableObject {
         let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
         dropPendingCallBack() // the user's own dial supersedes a held call-back
-        let name = contacts.first { $0.uri == t || CallController.userPart(of: $0.uri) == t }?.displayName
+        // The directory name for this party, matched by number: "202" from
+        // the keypad, "sip:202@dialler" from the Recents tab and the
+        // contact's own URI are one party (SPEC §6 item 16).
+        let number = CallController.numberPart(of: t)
+        let name = contacts.first { $0.uri == t || CallController.numberPart(of: $0.uri) == number }?.displayName
         let id = controller.startCall(to: t, displayName: name)
         if id == nil {
             append("call to \(t) not started (see log above)")
@@ -549,7 +553,7 @@ final class AppModel: ObservableObject {
 
     private func title(for call: TrackedCall) -> String {
         if call.direction == .outgoing {
-            return call.wake.to.displayName ?? call.target
+            return call.wake.to.displayName ?? CallController.numberPart(of: call.target)
         }
         let provided = call.wake.from.displayName?.isEmpty == false ? call.wake.from.displayName : nil
         return nameIndex.name(forURI: call.wake.from.uri) ?? provided ?? CallController.numberPart(of: call.wake.from.uri)

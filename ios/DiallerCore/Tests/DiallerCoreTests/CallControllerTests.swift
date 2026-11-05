@@ -542,6 +542,17 @@ final class CallControllerTests: XCTestCase {
         XCTAssertEqual(CallController.numberPart(of: "201"), "201")
     }
 
+    /// An outgoing call to a party with no directory name is shown by its
+    /// number, whatever spelling it was dialled under — the Recents tab
+    /// dials the stored URI, the keypad bare digits.
+    func testOutgoingWithoutNameIsShownByNumber() {
+        let (c, ui, _, _) = make()
+        c.setAccount(user: "100@dialler", sip: SIPTarget(host: "h", port: 5061, transport: "tls"))
+        c.startCall(to: "sip:10910@dialpark;transport=tls")
+        XCTAssertEqual(ui.started.last?.1, "sip:10910@dialpark;transport=tls", "the handle is what was dialled; the bridge derives the Recents handle")
+        XCTAssertEqual(ui.started.last?.2, "10910", "no name → the number, never the URI")
+    }
+
     /// SPEC §6 item 16: the handle CallKit writes to the Phone app is the
     /// directory number whatever spelling the party arrived under, so one
     /// party is one row; a non-numeric user keeps its host for routing.

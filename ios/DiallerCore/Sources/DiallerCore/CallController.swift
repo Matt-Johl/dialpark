@@ -344,7 +344,12 @@ public final class CallController {
                         sip: account.sip, expiresAt: now().addingTimeInterval(120))
         lock.withLock { calls[id] = TrackedCall(wake: wake, phase: .ringing, sipArrived: true, direction: .outgoing, target: trimmed, startedAt: now()) }
         log("calling \(trimmed) as \(id)")
-        ui.startOutgoing(callID: id, handle: trimmed, displayName: displayName ?? trimmed)
+        // No directory name: the party is shown by its number, as an
+        // incoming caller without a name is (`callerName(for:)`). CallKit
+        // shows a name in preference to the handle, on its call screen and
+        // in the Phone app's row, so a raw target here was the one way
+        // "sip:10910@dialpark" still reached the user (device, 2026-11-05).
+        ui.startOutgoing(callID: id, handle: trimmed, displayName: displayName ?? Self.numberPart(of: trimmed))
         return id
     }
 
