@@ -35,6 +35,26 @@ final class DemoCallTests: XCTestCase {
         }
     }
 
+    /// Why the app resets its book when the demo connects
+    /// (`AppModel.connectDemo`): a demo directory rebuilt from a changed
+    /// seed ends at the same version as the one before, so a book synced
+    /// from the old seed is never corrected by an incremental sync; from
+    /// version 0 it is.
+    func testABookFromAnOlderSeedIsOnlyRefreshedFromScratch() async throws {
+        let old = [Demo.Contact(name: "Reception", number: "100", favourite: false)]
+        let new = [Demo.Contact(name: "Reception", number: "1000", favourite: false)]
+        var book = AddressBook()
+        try await DemoDirectory(seed: old).sync(&book)
+        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"])
+
+        try await DemoDirectory(seed: new).sync(&book)
+        XCTAssertEqual(book.sorted.map(\.uri), ["100@demo.dialler"], "same version, nothing applied: the stale copy survives an incremental sync")
+
+        book.reset()
+        try await DemoDirectory(seed: new).sync(&book)
+        XCTAssertEqual(book.sorted.map(\.uri), ["1000@demo.dialler"], "from version 0 the new seed arrives in full")
+    }
+
     /// A demo contact's number by name, so the tests follow the directory
     /// rather than pinning numbers that move (they moved to four digits on
     /// 2026-11-05).
