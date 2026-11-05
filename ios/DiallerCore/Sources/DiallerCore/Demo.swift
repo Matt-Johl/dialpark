@@ -28,8 +28,12 @@ public enum Demo {
     /// "Busy" in Recents can be seen too.
     public static let busyNumber = "299"
 
-    /// Who rings when the demo is asked for an incoming call.
-    public static let caller = (name: "Reception", number: "100")
+    /// Who rings when the demo is asked for an incoming call. Not a three
+    /// digit number: the Phone app applies the carrier's number rules to a
+    /// CallKit handle, and 100 is the voicemail access number on Matt's
+    /// network, so Reception's row there read "Voicemail" (device,
+    /// 2026-11-05).
+    public static let caller = (name: "Reception", number: "1000")
 
     public struct Contact: Sendable {
         public let name: String
@@ -42,7 +46,7 @@ public enum Demo {
     /// The demo directory as it starts. Fictitious people; the one outside
     /// number is from Ofcom's range reserved for drama (07700 900xxx).
     public static let contacts: [Contact] = [
-        Contact(name: "Amara Nwosu", number: "112", favourite: true),
+        Contact(name: "Amara Nwosu", number: "1120", favourite: true), // not 112: the emergency number, which iOS treats as such
         Contact(name: "Ben Hartley", number: "215", favourite: false),
         Contact(name: "Daniel Okafor", number: "231", favourite: true),
         Contact(name: "Facilities", number: "320", favourite: false),
