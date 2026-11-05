@@ -1875,7 +1875,15 @@ on by config — see §7.4.
      trunk caller's "sip:30933@10.7.160.11" is "30933", called back the
      way the keypad dials it; a non-numeric user keeps its host. The
      app's own screens already showed numbers (`numberPart`); CallKit was
-     the one place a URI still reached the user (device, 2026-11-05); `AppModel.callBack(activity:)` behind
+     the one place a URI still reached the user (device, 2026-11-05).
+     *Consequence, noted the same day:* the Phone app applies the
+     carrier's number rules to a handle it can read as a number — the
+     demo's Reception on extension 100 was labelled "Voicemail" there,
+     100 being the voicemail access number on the test network — so the
+     demo caller moved to 1000. A customer extension that equals a
+     carrier short code (100, 121, 123, 222, 901, …) will be labelled by
+     iOS in the same way, in the Phone app only; that is their numbering
+     plan's to avoid, not a different handle's; `AppModel.callBack(activity:)` behind
      `ContentView.onContinueUserActivity("INStartCallIntent")` (Info.plist
      `NSUserActivityTypes` lists the type, as SwiftUI's documentation
      requires) dials the intent's handle — the same string the Recents tab
