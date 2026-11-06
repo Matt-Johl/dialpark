@@ -1946,12 +1946,22 @@ on by config — see §7.4.
      register contact names only when the app manages them itself, as it
      does); `App/en.lproj/AppIntentVocabulary.plist` with three example
      phrases for the Siri guide, which also clears the advisory. The
-     extension's Info.plist is unchanged. *Verification:* the matcher's
+     extension's Info.plist is unchanged. *"On speaker" (2026-11-06):*
+     Siri carries it as the intent's audio route, not as words; the app
+     reads it with the party, holds it against the call it places
+     (`SpeakerRequest`, DiallerCore, table-tested) and applies it once
+     when CallKit activates that call's audio session — the output route
+     belongs to the session, which exists only from then — through the
+     same code the in-call button uses, so the button shows it on and
+     toggles as usual; a call that never reaches its session forgets the
+     request; Bluetooth is left to iOS's own routing. *Verification:* the matcher's
      table; the built app bundle carries `en.lproj/AppIntentVocabulary.plist`;
      on the device, Siri allowed → "Call Reception with Dialler" rings
      1000, "Call Daniel with Dialler" makes Siri ask which Daniel, "Call
-     Priya with Dialler" (not in the directory) is refused, "Call 2310
-     with Dialler" dials the number; Siri denied → the extension is never
+     Bob with Dialler" (not in the directory) is refused, "Call 2310
+     with Dialler" dials the number, "Call Priya with Dialler on speaker"
+     connects on the speaker with the in-call button showing it on and
+     still toggling; Siri denied → the extension is never
      reached and Recents call-back still works; `intents.log` in the
      diagnostics shows each resolve. The next App Store upload must not
      carry ITMS-90626. Known limits: Siri ingests registered names with a

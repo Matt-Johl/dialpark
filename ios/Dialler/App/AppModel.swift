@@ -355,6 +355,7 @@ final class AppModel: ObservableObject {
         callKit.onStartFailed = { [weak self] id in
             self?.controller.startFailed(callID: id)
             self?.calls.removeAll { $0.id == id }
+            self?.speakerRequest.forget(callID: id)
         }
         callKit.onConnected = { [weak self] id in
             guard let self, let i = self.calls.firstIndex(where: { $0.id == id }) else { return }
@@ -391,7 +392,17 @@ final class AppModel: ObservableObject {
             // After the engine, never before: a tone must not be what
             // activates the session, and must not race the call's own
             // audio units into it (see `TonePlayer`).
-            Task { @MainActor in self?.tones.session(active: true) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.tones.session(active: true)
+                // Siri's "on speaker" (SPEC §6 item 17): the output route
+                // belongs to this session, which exists only from now, so
+                // the request held since the dial is applied here, once.
+                if let id = self.activeCall?.id, self.speakerRequest.takeIfDue(activeCallID: id) {
+                    self.append("siri: \(id) on speaker, as asked")
+                    self.setSpeaker(true)
+                }
+            }
         }
         callKit.onAudioDeactivated = { [weak self] in
             self?.engine.audioSessionDeactivated()
@@ -482,12 +493,19 @@ final class AppModel: ObservableObject {
 
     func toggleSpeaker() {
         guard let call = activeCall else { return }
-        let speaker = !call.speaker
+        setSpeaker(!call.speaker)
+    }
+
+    /// The one route for every call up: the audio session's output port and
+    /// the flag the in-call button shows, set together so the button always
+    /// says what the audio is doing. The button toggles it; a Siri request
+    /// sets it when the call's audio comes up (`speakerRequest`).
+    private func setSpeaker(_ on: Bool) {
         do {
-            try AVAudioSession.sharedInstance().overrideOutputAudioPort(speaker ? .speaker : .none)
-            for i in calls.indices { calls[i].speaker = speaker } // one route
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
+            for i in calls.indices { calls[i].speaker = on } // one route
         } catch {
-            append("speaker toggle failed: \(error.localizedDescription)")
+            append("speaker \(on ? "on" : "off") failed: \(error.localizedDescription)")
         }
     }
 
@@ -496,6 +514,7 @@ final class AppModel: ObservableObject {
     /// `end`, which calls this.
     func callEnded(_ id: String) {
         calls.removeAll { $0.id == id }
+        speakerRequest.forget(callID: id)
         if calls.isEmpty { clearNotice() } // it belonged to a call that is gone
         // The last call is over and we are not on screen: back to the
         // background rule (no session; the extension covers wakes).
@@ -597,13 +616,17 @@ final class AppModel: ObservableObject {
             append("phone recents: call-back without a handle ignored")
             return
         }
-        Breadcrumb.drop("phone recents: call-back to \(handle)")
+        // "… on speaker": Siri carries it as the intent's audio route, not
+        // as words (SPEC §6 item 17). Bluetooth is iOS's own routing.
+        let speaker = intent.audioRoute == .speakerphoneAudioRoute
+        let request = CallBackRequest(handle: handle, speaker: speaker)
+        Breadcrumb.drop("phone recents: call-back to \(handle)\(speaker ? " on speaker" : "")")
         if readyToDial {
-            append("phone recents: calling back \(handle)")
-            dial(handle)
+            append("phone recents: calling back \(handle)\(speaker ? " on speaker" : "")")
+            place(request)
         } else {
             append("phone recents: holding call-back to \(handle) until the engine is up")
-            pendingCallBack = handle
+            pendingCallBack = request
             pendingCallBackExpiry?.cancel()
             pendingCallBackExpiry = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(Self.callBackHoldSeconds) * 1_000_000_000)
@@ -612,15 +635,32 @@ final class AppModel: ObservableObject {
                 // the person has moved on, is a surprise call, not a late
                 // success. The hold is as long as a launch and registration
                 // reasonably take; past that the tap is dropped and said so.
-                self.append("phone recents: call-back to \(held) dropped — not registered after \(Self.callBackHoldSeconds) s")
+                self.append("phone recents: call-back to \(held.handle) dropped — not registered after \(Self.callBackHoldSeconds) s")
                 self.pendingCallBack = nil
                 self.pendingCallBackExpiry = nil
             }
         }
     }
 
+    /// What a Phone Recents tap or a Siri request asks for: the party, and
+    /// whether the call goes to the speaker once its audio is up.
+    private struct CallBackRequest {
+        let handle: String
+        let speaker: Bool
+    }
+
+    /// Dial it; a speaker request is held against the call that results
+    /// and applied when CallKit activates its audio session.
+    private func place(_ request: CallBackRequest) {
+        guard let id = dial(request.handle) else { return }
+        if request.speaker { speakerRequest.request(callID: id) }
+    }
+
+    /// Siri's "on speaker", waiting for the requested call's audio session.
+    private var speakerRequest = SpeakerRequest()
+
     /// A call-back from the Phone app waiting for the engine (cold launch).
-    private var pendingCallBack: String?
+    private var pendingCallBack: CallBackRequest?
     private var pendingCallBackExpiry: Task<Void, Never>?
     private static let callBackHoldSeconds = 30
     /// The SIP stack is registered (or the demo's welcome has arrived), so
@@ -632,10 +672,10 @@ final class AppModel: ObservableObject {
     private var readyToDial: Bool { isDemo ? link == .connected : engineUp }
 
     private func flushPendingCallBack() {
-        guard let handle = pendingCallBack, readyToDial else { return }
+        guard let request = pendingCallBack, readyToDial else { return }
         dropPendingCallBack()
-        append("phone recents: calling back \(handle) now the engine is up")
-        dial(handle)
+        append("phone recents: calling back \(request.handle) now the engine is up\(request.speaker ? ", on speaker" : "")")
+        place(request)
     }
 
     private func dropPendingCallBack() {
