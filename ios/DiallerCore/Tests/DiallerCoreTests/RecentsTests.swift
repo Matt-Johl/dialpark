@@ -96,6 +96,21 @@ final class RecentsTests: XCTestCase {
         XCTAssertEqual(store.load(), [])
     }
 
+    /// The case that evicted history (2026-11-05): a run's first outgoing
+    /// call used to be "out-1" like the previous run's, and the store's
+    /// same-call rule replaced the old record. With run tokens both stay.
+    func testCallsFromTwoRunsWithTheSameCounterBothSurvive() {
+        let store = tempStore()
+        store.record(record("out-a1b2c3-1", outcome: .completed))
+        store.record(record("out-d4e5f6-1", outcome: .completed, endedAt: t0.addingTimeInterval(60)))
+        XCTAssertEqual(store.load().map(\.id), ["out-d4e5f6-1", "out-a1b2c3-1"], "two runs, two calls")
+
+        // The rule itself is unchanged: one call recorded twice is one row.
+        store.record(record("out-d4e5f6-1", outcome: .failed, endedAt: t0.addingTimeInterval(61)))
+        XCTAssertEqual(store.load().count, 2)
+        XCTAssertEqual(store.load().first?.outcome, .failed)
+    }
+
     func testFoldingTheExtensionsSidecars() {
         let store = tempStore()
         let wake = Wake(callID: "w1", from: Party(displayName: "Reception", uri: "sip:100@pbx"), to: Party(uri: "sip:201@dialler"),

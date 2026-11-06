@@ -39,6 +39,8 @@
 	<string>Dialler connects to your organisation’s call server on the office network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Dialler uses the microphone so the person you’re talking to can hear you.</string>
+	<key>NSSiriUsageDescription</key>
+	<string>Dialler tells Siri the names in your directory so you can say “Call Reception with Dialler”.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INStartCallIntent</string>

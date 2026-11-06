@@ -177,6 +177,26 @@ final class OutboundCallTests: XCTestCase {
         return (c, ui, engine)
     }
 
+    /// Two launches (two controllers with their own run tokens) never name a
+    /// call the same, so a record from one cannot evict the other's from
+    /// Recents; without a token the bare ids of the other tests stay.
+    func testLocalCallIDsCarryTheRunToken() {
+        let sip = SIPTarget(host: "10.0.0.1", port: 5061, transport: "tls")
+        let first = CallController(ui: FakeCallUI(), engine: FakeEngine(), runToken: "a1b2c3")
+        let second = CallController(ui: FakeCallUI(), engine: FakeEngine(), runToken: "d4e5f6")
+        first.setAccount(user: "201@dialler", sip: sip)
+        second.setAccount(user: "201@dialler", sip: sip)
+        let a = first.startCall(to: "202")
+        let b = second.startCall(to: "202")
+        XCTAssertEqual(a, "out-a1b2c3-1")
+        XCTAssertEqual(b, "out-d4e5f6-1")
+        XCTAssertNotEqual(a, b, "the same counter in two runs is two calls")
+
+        let bare = CallController(ui: FakeCallUI(), engine: FakeEngine())
+        bare.setAccount(user: "201@dialler", sip: sip)
+        XCTAssertEqual(bare.startCall(to: "202"), "out-1", "no token, the bare id")
+    }
+
     /// Keypad digits or a directory URI: system UI approves, then the engine
     /// dials; progress and answer are reported back to the system UI.
     func testStartCallGoesThroughSystemUIThenDials() {

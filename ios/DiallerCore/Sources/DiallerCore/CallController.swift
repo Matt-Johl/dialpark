@@ -231,10 +231,24 @@ public final class CallController {
         CallController.timerQueue.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
-    public init(ui: CallUI, engine: CallEngine? = nil, now: @escaping () -> Date = Date.init, log: @escaping (String) -> Void = { _ in }) {
+    /// Makes a local call id unique across launches. The controller names
+    /// the calls the server never named — an outgoing call, an incoming
+    /// INVITE with no wake — from a counter that starts at 1 in every
+    /// process, and `RecentsStore` treats two records with one id as the
+    /// same call, so without a token the first call after a relaunch
+    /// evicted the first call of the previous run from Recents (device,
+    /// 2026-11-05). The app passes a per-launch token and its ids read
+    /// `out-<token>-1`; nil keeps the bare `out-1` the tests and the
+    /// headless tools assert on, which is only safe where no Recents file
+    /// outlives the process.
+    private let runToken: String?
+
+    public init(ui: CallUI, engine: CallEngine? = nil, now: @escaping () -> Date = Date.init, runToken: String? = nil,
+                log: @escaping (String) -> Void = { _ in }) {
         self.ui = ui
         self.engine = engine
         self.now = now
+        self.runToken = runToken
         self.log = log
         engine?.onIncomingCall = { [weak self] id, peer, name, dialler in self?.handle(sipIncoming: peer, displayName: name, engineCallID: id, diallerCallID: dialler) }
         engine?.onCallEnded = { [weak self] id, reason, status in self?.handle(sipEnded: reason, engineCallID: id, status: status) }
@@ -339,7 +353,7 @@ public final class CallController {
             log("cannot call \(trimmed): a call is already in progress")
             return nil
         }
-        let id: String = lock.withLock { sipCallSeq += 1; return "out-\(sipCallSeq)" }
+        let id: String = lock.withLock { sipCallSeq += 1; return localID("out", sipCallSeq) }
         let wake = Wake(callID: id, from: Party(uri: "sip:\(account.user)"), to: Party(displayName: displayName, uri: trimmed),
                         sip: account.sip, expiresAt: now().addingTimeInterval(120))
         lock.withLock { calls[id] = TrackedCall(wake: wake, phase: .ringing, sipArrived: true, direction: .outgoing, target: trimmed, startedAt: now()) }
@@ -510,7 +524,7 @@ public final class CallController {
             guard let account else { return .noAccount }
             guard admitsAnotherCallLocked() else { return .refused }
             sipCallSeq += 1
-            let id = "sip-\(sipCallSeq)"
+            let id = localID("sip", sipCallSeq)
             let wake = Wake(callID: id, from: from, to: Party(uri: "sip:\(account.user)"),
                             sip: account.sip, expiresAt: now().addingTimeInterval(60))
             calls[id] = TrackedCall(wake: wake, phase: .ringing, sipArrived: true, reportedName: name,
@@ -912,6 +926,12 @@ public final class CallController {
         log("ended \(callID) by user")
         record(call, id: callID, ending: .user)
         if wasAnswered { resumeLoneHeldCall() }
+    }
+
+    /// `out-1`, or `out-<token>-1` when a run token was given (see `runToken`).
+    private func localID(_ kind: String, _ n: Int) -> String {
+        if let runToken { return "\(kind)-\(runToken)-\(n)" }
+        return "\(kind)-\(n)"
     }
 
     /// "sip:201@dialler;transport=tls" → "201@dialler"; "201" → "201".
